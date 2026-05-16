@@ -1,0 +1,32 @@
+{
+  "name": "cursorscope",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Export Cursor IDE usage to OpenTelemetry (traces, metrics, logs) for backends like Last9",
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file=.env src/server.js",
+    "start:bg": "scripts/ensure-cursorscope.sh",
+    "stop": "scripts/stop-cursorscope.sh",
+    "install:global-hooks": "scripts/install-global-hooks.sh",
+    "uninstall:global-hooks": "scripts/uninstall-global-hooks.sh",
+    "dev": "node --env-file=.env --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/api-logs": "^0.205.0",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.205.0",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.205.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.205.0",
+    "@opentelemetry/resources": "^2.1.0",
+    "@opentelemetry/sdk-logs": "^0.205.0",
+    "@opentelemetry/sdk-metrics": "^2.1.0",
+    "@opentelemetry/sdk-trace-base": "^2.1.0",
+    "@opentelemetry/semantic-conventions": "^1.38.0",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2"
+  }
+}

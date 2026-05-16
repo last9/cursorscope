@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Environment — never commit secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+npm-debug.log*
+*.log
+
+# macOS
+.DS_Store
+
+# Editor state
+.vscode/
+*.swp
+*.swo
+
+# Runtime
+*.pid

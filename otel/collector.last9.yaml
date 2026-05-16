@@ -1,0 +1,39 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  otlphttp/last9:
+    endpoint: ${env:LAST9_OTLP_HTTP_ENDPOINT}
+    headers:
+      Authorization: ${env:LAST9_AUTH_HEADER}
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+service:
+  telemetry:
+    logs:
+      level: ${env:OTELCOL_LOG_LEVEL}
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/last9]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/last9]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/last9]

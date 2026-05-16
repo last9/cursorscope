@@ -1,0 +1,13 @@
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.105.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    environment:
+      OTELCOL_LOG_LEVEL: ${OTELCOL_LOG_LEVEL:-info}
+      LAST9_OTLP_HTTP_ENDPOINT: ${LAST9_OTLP_HTTP_ENDPOINT:-}
+      LAST9_AUTH_HEADER: ${LAST9_AUTH_HEADER:-}
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      - ./otel/collector.local.yaml:/etc/otelcol/config.yaml:ro
