@@ -37,6 +37,10 @@ export function redactForLogs(value, { includeToolDetails = false } = {}) {
         out[key] = redactForLogs(nested, { includeToolDetails });
         continue;
       }
+      if (typeof nested === "string") {
+        out[key] = redactSensitiveText(nested);
+        continue;
+      }
       out[key] = redactForLogs(nested, { includeToolDetails });
     }
     return out;

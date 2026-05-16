@@ -12,11 +12,47 @@ import { MeterProvider, PeriodicExportingMetricReader } from "@opentelemetry/sdk
 import { BasicTracerProvider, BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { wrapExporterWithLogging } from "./otel-export-logger.js";
 import { getConfiguredOtlpEndpoints } from "./otlp-endpoints.js";
-
-const GEN_AI_PROVIDER = "cursor";
-const GEN_AI_AGENT_NAME = "Cursor";
+import {
+  basenameOnly,
+  extractFileLineStats,
+  inferFileExtension
+} from "./line-stats.js";
+import {
+  classifyInvocation,
+  estimateMcpContextTokens,
+  estimateShellContextTokens,
+  estimateToolContextTokens,
+  estimateTokens,
+  resolveMcpServer,
+  resolveMcpTool
+} from "./attribution.js";
+import {
+  ATTR_GEN_AI_CONVERSATION_ID,
+  ATTR_GEN_AI_OPERATION_NAME,
+  ATTR_GEN_AI_OUTPUT_TYPE,
+  ATTR_GEN_AI_PROVIDER_NAME,
+  ATTR_GEN_AI_REQUEST_MODEL,
+  ATTR_GEN_AI_RESPONSE_ID,
+  ATTR_GEN_AI_TOOL_CALL_ID,
+  ATTR_GEN_AI_TOOL_NAME,
+  GEN_AI_OPERATION_NAME_VALUE_EXECUTE_TOOL,
+  GEN_AI_OPERATION_NAME_VALUE_INVOKE_AGENT
+} from "@opentelemetry/semantic-conventions/incubating";
+import {
+  buildExecuteToolAttributes,
+  buildInvokeAgentAttributes,
+  buildReasoningUsageAttributes,
+  buildUsageTokenAttributes,
+  GEN_AI_CURSOR_AGENT_NAME,
+  GEN_AI_PROVIDER_NAME,
+  resolveExecuteToolContext,
+  spanNameChat,
+  spanNameExecuteTool,
+  spanNameInvokeAgent
+} from "./gen-ai-semconv.js";
 const logUserPrompts = process.env.CURSOR_LOG_USER_PROMPTS === "true";
 const logToolDetails = process.env.CURSOR_LOG_TOOL_DETAILS === "true";
+const trackAttributedTokens = process.env.CURSOR_TRACK_ATTRIBUTED_TOKENS !== "false";
 const flushOnStop = process.env.CURSOR_FLUSH_ON_STOP !== "false";
 const metricExportIntervalMs = Number(process.env.METRIC_EXPORT_INTERVAL_MS || 15000);
 
@@ -92,6 +128,19 @@ const promptCounter = meter.createCounter("cursor_prompt_total", {
 const toolCounter = meter.createCounter("cursor_tool_executions_total", {
   description: "Cursor tool executions (companion to gen_ai.client.operation.duration)"
 });
+const linesOfCodeCounter = meter.createCounter("cursor_lines_of_code_total", {
+  description: "Lines of code added or removed by Cursor agent and Tab edits"
+});
+const mcpInvocationCounter = meter.createCounter("cursor_mcp_invocations_total", {
+  description: "MCP tool invocations by server and tool name"
+});
+const attributionInvocationCounter = meter.createCounter("cursor_attribution_invocations_total", {
+  description: "Invocations attributed to MCP servers, CLIs, skills, subagents, or tools"
+});
+const attributedContextTokensCounter = meter.createCounter("cursor_attributed_context_tokens_total", {
+  description:
+    "Estimated or MCP-reported context tokens flowing through MCP, CLI, skills, and tools (not Cursor LLM billing)"
+});
 
 const genAiOperationDuration = meter.createHistogram("gen_ai.client.operation.duration", {
   description: "GenAI operation duration per OTel semconv",
@@ -125,6 +174,44 @@ const openGenerationByConversation = new Map();
 const activeSubagents = new Map();
 /** @type {Map<string, { span: import('@opentelemetry/api').Span, ctx: import('@opentelemetry/api').Context }>} */
 const activeSessions = new Map();
+/** @type {Map<string, { span: import('@opentelemetry/api').Span, ctx: import('@opentelemetry/api').Context, startHrTime: number }>} */
+const activeToolCalls = new Map();
+
+function endSession(sessionId, reason) {
+  if (!sessionId) {
+    return;
+  }
+  const active = activeSessions.get(sessionId);
+  if (!active) {
+    return;
+  }
+  active.span.setAttribute("cursor.session.end_reason", reason);
+  active.span.end();
+  activeSessions.delete(sessionId);
+}
+
+function resolveToolName(hookData, fallback = "unknown") {
+  const raw =
+    hookData.tool_name ??
+    hookData.toolName ??
+    hookData.command ??
+    hookData.mcp_tool_name ??
+    hookData.name;
+
+  if (raw === undefined || raw === null) {
+    return fallback;
+  }
+  if (typeof raw === "string") {
+    return raw.trim() || fallback;
+  }
+  if (typeof raw === "object") {
+    const nested = raw.name ?? raw.tool ?? raw.command;
+    if (typeof nested === "string" && nested.trim()) {
+      return nested.trim();
+    }
+  }
+  return String(raw);
+}
 
 /** @returns {{ shouldFlush: boolean }} */
 export function recordHookEvent(event) {
@@ -174,6 +261,9 @@ export function recordHookEvent(event) {
     case "afterFileEdit":
       handleAfterFileEdit(hookData, baseAttrs);
       break;
+    case "afterTabFileEdit":
+      handleAfterTabFileEdit(hookData, baseAttrs);
+      break;
     case "subagentStart":
       handleSubagentStart(hookData, baseAttrs);
       break;
@@ -211,14 +301,17 @@ function handleSessionStart(hookData, baseAttrs) {
     endSession(sessionId, "superseded");
   }
 
-  const span = startSpan(spanNameInvokeAgent(GEN_AI_AGENT_NAME), {
-    ...baseAttrs,
-    "gen_ai.operation.name": "invoke_agent",
-    "gen_ai.agent.name": GEN_AI_AGENT_NAME,
-    "cursor.composer_mode": hookData.composer_mode,
-    "cursor.is_background_agent": hookData.is_background_agent ?? false,
-    "cursor.span.role": "session"
-  });
+  const span = startSpan(
+    spanNameInvokeAgent(GEN_AI_CURSOR_AGENT_NAME),
+    {
+      ...buildInvokeAgentAttributes(baseAttrs, { agentName: GEN_AI_CURSOR_AGENT_NAME }),
+      "cursor.composer_mode": hookData.composer_mode,
+      "cursor.is_background_agent": hookData.is_background_agent ?? false,
+      "cursor.span.role": "session"
+    },
+    context.active(),
+    SpanKind.INTERNAL
+  );
 
   if (sessionId) {
     const ctx = trace.setSpan(context.active(), span);
@@ -231,19 +324,18 @@ function handleSessionStart(hookData, baseAttrs) {
 function handleSessionEnd(hookData, baseAttrs) {
   const sessionId = hookData.session_id || hookData.conversation_id;
   endInteractionForConversation(sessionId, "session_end");
+  const activeSession = sessionId ? activeSessions.get(sessionId) : undefined;
   endSession(sessionId, hookData.reason || "session_end");
-
-  const span = startSpan("cursor.session.end", {
-    ...baseAttrs,
-    "cursor.session.reason": hookData.reason,
-    "cursor.session.duration_ms": hookData.duration_ms,
-    "cursor.session.final_status": hookData.final_status
-  });
-
-  if (hookData.reason === "error") {
-    markSpanError(span, hookData.error_message || "session_error");
+  if (activeSession) {
+    activeSession.span.addEvent("gen_ai.client.session.end", {
+      "cursor.session.reason": hookData.reason,
+      "cursor.session.duration_ms": hookData.duration_ms,
+      "cursor.session.final_status": hookData.final_status
+    });
+    if (hookData.reason === "error") {
+      markSpanError(activeSession.span, hookData.error_message || "session_error");
+    }
   }
-  span.end();
 }
 
 function handleBeforeSubmitPrompt(hookData, baseAttrs) {
@@ -256,10 +348,7 @@ function handleBeforeSubmitPrompt(hookData, baseAttrs) {
 
   const promptLength = typeof hookData.prompt === "string" ? hookData.prompt.length : 0;
   const attrs = {
-    ...baseAttrs,
-    "gen_ai.operation.name": "invoke_agent",
-    "gen_ai.agent.name": GEN_AI_AGENT_NAME,
-    "gen_ai.output.type": "text",
+    ...buildInvokeAgentAttributes(baseAttrs, { agentName: GEN_AI_CURSOR_AGENT_NAME }),
     "cursor.prompt.length": promptLength,
     "cursor.attachment_count": Array.isArray(hookData.attachments) ? hookData.attachments.length : 0
   };
@@ -268,7 +357,7 @@ function handleBeforeSubmitPrompt(hookData, baseAttrs) {
     attrs["cursor.prompt"] = hookData.prompt;
   }
 
-  const span = startSpan(spanNameInvokeAgent(GEN_AI_AGENT_NAME), attrs, context.active(), SpanKind.INTERNAL);
+  const span = startSpan(spanNameInvokeAgent(GEN_AI_CURSOR_AGENT_NAME), attrs, context.active(), SpanKind.INTERNAL);
   const ctx = trace.setSpan(context.active(), span);
 
   if (generationId) {
@@ -281,88 +370,331 @@ function handleBeforeSubmitPrompt(hookData, baseAttrs) {
   promptCounter.add(1, legacyMetricLabels(baseAttrs));
 }
 
-function handlePreToolUse(hookData, baseAttrs) {
+function handlePreToolUse(hookData, baseAttrs, hookName = "preToolUse") {
   const parent = resolveParentContext(hookData);
   const toolName = resolveToolName(hookData, "unknown");
-  if (parent.interaction) {
-    parent.interaction.span.addEvent("gen_ai.tool.queued", {
-      "gen_ai.tool.name": toolName,
-      "gen_ai.tool.call.id": hookData.tool_use_id
-    });
-    return;
-  }
-
-  const span = startSpan(spanNameExecuteTool(toolName), {
-    ...baseAttrs,
-    "gen_ai.operation.name": "execute_tool",
-    "gen_ai.tool.name": toolName,
-    "gen_ai.tool.call.id": hookData.tool_use_id,
-    "cursor.hook.phase": "pre"
-  }, parent.ctx);
-  span.end();
+  beginExecuteToolSpan(hookData, baseAttrs, parent.ctx, hookName, toolName);
 }
 
-function handlePostToolUse(hookData, baseAttrs, { failed }) {
+function handlePostToolUse(
+  hookData,
+  baseAttrs,
+  { failed, skipAttribution = false, hookName = "postToolUse" }
+) {
   const parent = resolveParentContext(hookData);
   const toolName = resolveToolName(hookData, "unknown");
   const durationMs = hookData.duration ?? hookData.duration_ms;
-  const errorType = resolveErrorType(hookData, failed);
+  const toolTokens = estimateToolContextTokens(hookData);
+  const toolContext = resolveExecuteToolContext(hookData, hookName, toolName);
 
-  const attrs = {
-    ...baseAttrs,
-    "gen_ai.operation.name": "execute_tool",
-    "gen_ai.tool.name": toolName,
-    "gen_ai.tool.call.id": hookData.tool_use_id,
-    "gen_ai.tool.type": inferToolType(toolName),
-    "cursor.tool.success": !failed,
-    "cursor.tool.duration_ms": durationMs,
-    "cursor.tool.failure_type": hookData.failure_type,
-    "cursor.tool.error_message": hookData.error_message
-  };
-
-  if (errorType) {
-    attrs["error.type"] = errorType;
+  if (!skipAttribution) {
+    recordAttributionInvocation(toolContext.attribution, baseAttrs, { success: !failed });
+    recordAttributedContextTokens(toolTokens, baseAttrs, toolContext.attribution);
   }
 
-  const span = startSpan(
-    spanNameExecuteTool(toolName),
-    attrs,
-    parent.ctx,
-    SpanKind.INTERNAL
+  endExecuteToolSpan(hookData, baseAttrs, parent.ctx, {
+    failed,
+    hookName,
+    toolName,
+    toolContext,
+    tokenEstimate: toolTokens,
+    durationMs
+  });
+}
+
+/**
+ * @param {Record<string, unknown>} hookData
+ * @param {Record<string, unknown>} baseAttrs
+ * @param {import('@opentelemetry/api').Context} parentCtx
+ * @param {string} hookName
+ * @param {string} toolNameOverride
+ */
+function beginExecuteToolSpan(hookData, baseAttrs, parentCtx, hookName, toolNameOverride) {
+  const toolContext = resolveExecuteToolContext(hookData, hookName, toolNameOverride);
+  const toolUseId = hookData.tool_use_id;
+
+  if (!toolUseId) {
+    return;
+  }
+
+  if (activeToolCalls.has(toolUseId)) {
+    return;
+  }
+
+  const attrs = buildExecuteToolAttributes(baseAttrs, toolContext, hookData, {
+    includePayloads: logToolDetails
+  });
+
+  const span = startSpan(spanNameExecuteTool(toolContext.genAiToolName), attrs, parentCtx, SpanKind.INTERNAL);
+  const ctx = trace.setSpan(parentCtx, span);
+  activeToolCalls.set(toolUseId, { span, ctx, startHrTime: performance.now() });
+}
+
+/**
+ * @param {Record<string, unknown>} hookData
+ * @param {Record<string, unknown>} baseAttrs
+ * @param {import('@opentelemetry/api').Context} parentCtx
+ * @param {{ failed: boolean, hookName: string, toolName: string, toolContext: ReturnType<resolveExecuteToolContext>, tokenEstimate: { input: number, output: number }, durationMs?: number }} options
+ */
+function endExecuteToolSpan(hookData, baseAttrs, parentCtx, options) {
+  const { failed, hookName, toolName, toolContext, tokenEstimate, durationMs } = options;
+  const toolUseId = hookData.tool_use_id;
+  const errorType = resolveErrorType(hookData, failed);
+  const active = toolUseId ? activeToolCalls.get(toolUseId) : undefined;
+
+  const resolvedDurationMs =
+    typeof durationMs === "number"
+      ? durationMs
+      : active
+        ? Math.round(performance.now() - active.startHrTime)
+        : undefined;
+
+  const postAttrs = filterDefined({
+    ...buildUsageTokenAttributes(tokenEstimate),
+    "cursor.tool.success": !failed,
+    "cursor.tool.duration_ms": resolvedDurationMs,
+    "cursor.tool.failure_type": hookData.failure_type,
+    "cursor.tool.error_message": hookData.error_message,
+    "cursor.lines.added": hookData.cursor_lines_added,
+    "cursor.lines.removed": hookData.cursor_lines_removed,
+    "cursor.file.basename": basenameOnly(hookData.file_path),
+    "cursor.file.extension": hookData.file_path ? inferFileExtension(hookData.file_path) : undefined,
+    "error.type": errorType
+  });
+
+  if (logToolDetails) {
+    Object.assign(
+      postAttrs,
+      buildExecuteToolAttributes(baseAttrs, toolContext, hookData, { includePayloads: true })
+    );
+  }
+
+  if (active) {
+    active.span.setAttributes(postAttrs);
+    if (failed) {
+      markSpanError(active.span, hookData.error_message || hookData.failure_type || "tool_failed");
+    }
+    active.span.end();
+    activeToolCalls.delete(toolUseId);
+  } else {
+    const attrs = {
+      ...buildExecuteToolAttributes(baseAttrs, toolContext, hookData, {
+        includePayloads: logToolDetails
+      }),
+      ...postAttrs
+    };
+    const span = startSpan(
+      spanNameExecuteTool(toolContext.genAiToolName),
+      attrs,
+      parentCtx,
+      SpanKind.INTERNAL
+    );
+    if (failed) {
+      markSpanError(span, hookData.error_message || hookData.failure_type || "tool_failed");
+    }
+    span.end();
+  }
+
+  toolCounter.add(
+    1,
+    legacyMetricLabels(baseAttrs, {
+      tool_name: toolContext.genAiToolName,
+      success: String(!failed)
+    })
   );
 
-  if (failed) {
-    markSpanError(span, hookData.error_message || hookData.failure_type || "tool_failed");
-  }
-  span.end();
-
-  toolCounter.add(1, legacyMetricLabels(baseAttrs, { tool_name: toolName, success: String(!failed) }));
-
-  if (typeof durationMs === "number") {
-    recordGenAiDuration(durationMs / 1000, baseAttrs, "execute_tool", { "gen_ai.tool.name": toolName });
-  }
-
-  if (parent.interaction) {
-    parent.interaction.span.addEvent(failed ? "gen_ai.tool.error" : "gen_ai.tool.completed", {
-      "gen_ai.tool.name": toolName,
-      "cursor.tool.duration_ms": durationMs
+  if (typeof resolvedDurationMs === "number" && resolvedDurationMs > 0) {
+    recordGenAiDuration(resolvedDurationMs / 1000, baseAttrs, GEN_AI_OPERATION_NAME_VALUE_EXECUTE_TOOL, {
+      [ATTR_GEN_AI_TOOL_NAME]: toolContext.genAiToolName
     });
+  }
+}
+
+function handleBeforeShellExecution(hookData, baseAttrs) {
+  handlePreToolUse(
+    {
+      ...hookData,
+      tool_name: resolveToolName({ ...hookData, tool_name: hookData.command }, "shell"),
+      tool_use_id: hookData.tool_use_id
+    },
+    baseAttrs,
+    "beforeShellExecution"
+  );
+}
+
+function handleAfterShellExecution(hookData, baseAttrs) {
+  const failed =
+    hookData.status === "error" ||
+    (typeof hookData.exit_code === "number" && hookData.exit_code !== 0);
+  const attribution = classifyInvocation("afterShellExecution", hookData);
+  const shellTokens = estimateShellContextTokens(hookData);
+
+  recordAttributionInvocation(attribution, baseAttrs, { success: !failed });
+  recordAttributedContextTokens(shellTokens, baseAttrs, attribution);
+
+  handlePostToolUse(
+    {
+      ...hookData,
+      tool_name: resolveToolName({ ...hookData, tool_name: hookData.command }, "shell"),
+      duration_ms: hookData.duration_ms ?? hookData.duration
+    },
+    baseAttrs,
+    { failed, skipAttribution: true, hookName: "afterShellExecution" }
+  );
+}
+
+function handleBeforeMcpExecution(hookData, baseAttrs) {
+  const mcpServer = resolveMcpServer(hookData);
+  const mcpTool = resolveMcpTool(hookData);
+  const attribution = classifyInvocation("beforeMCPExecution", hookData, `mcp:${mcpServer}/${mcpTool}`);
+
+  recordAttributionInvocation(attribution, baseAttrs, { phase: "pre" });
+  recordAttributedContextTokens(
+    { input: estimateTokens(hookData.tool_input), output: 0, source: "estimated" },
+    baseAttrs,
+    attribution
+  );
+
+  handlePreToolUse(
+    {
+      ...hookData,
+      tool_name: `mcp:${mcpServer}/${mcpTool}`,
+      mcp_server: mcpServer,
+      mcp_tool: mcpTool,
+      tool_use_id: hookData.tool_use_id
+    },
+    baseAttrs,
+    "beforeMCPExecution"
+  );
+}
+
+function handleAfterMcpExecution(hookData, baseAttrs) {
+  const mcpServer = resolveMcpServer(hookData);
+  const mcpTool = resolveMcpTool(hookData);
+  const failed = hookData.status === "error";
+  const attribution = classifyInvocation("afterMCPExecution", hookData, `mcp:${mcpServer}/${mcpTool}`);
+  const mcpTokens = estimateMcpContextTokens(hookData);
+
+  mcpInvocationCounter.add(
+    1,
+    legacyMetricLabels(baseAttrs, {
+      mcp_server: mcpServer,
+      mcp_tool: mcpTool,
+      success: String(!failed),
+      token_source: mcpTokens.source
+    })
+  );
+
+  recordAttributionInvocation(attribution, baseAttrs, { success: !failed });
+  recordAttributedContextTokens(mcpTokens, baseAttrs, attribution);
+
+  handlePostToolUse(
+    {
+      ...hookData,
+      tool_name: `mcp:${mcpServer}/${mcpTool}`,
+      mcp_server: mcpServer,
+      mcp_tool: mcpTool,
+      duration_ms: hookData.duration_ms ?? hookData.duration
+    },
+    baseAttrs,
+    { failed, skipAttribution: true, hookName: "afterMCPExecution" }
+  );
+}
+
+function handleBeforeReadFile(hookData, baseAttrs) {
+  const attribution = classifyInvocation("beforeReadFile", hookData, "read_file");
+  if (attribution.category === "skill") {
+    recordAttributionInvocation(attribution, baseAttrs, { phase: "read" });
+    recordAttributedContextTokens(
+      { input: estimateTokens(hookData.content), output: 0, source: "estimated" },
+      baseAttrs,
+      attribution
+    );
+  }
+
+  handlePreToolUse(
+    {
+      ...hookData,
+      tool_name: "read_file",
+      tool_use_id: hookData.tool_use_id
+    },
+    baseAttrs,
+    "beforeReadFile"
+  );
+}
+
+function handleAfterFileEdit(hookData, baseAttrs) {
+  recordFileLineStats(hookData, baseAttrs, "agent");
+  handlePostToolUse(
+    {
+      ...hookData,
+      tool_name: "edit_file",
+      duration_ms: hookData.duration_ms ?? hookData.duration,
+      cursor_lines_added: hookData.cursor_lines_added,
+      cursor_lines_removed: hookData.cursor_lines_removed
+    },
+    baseAttrs,
+    { failed: false }
+  );
+}
+
+function handleAfterTabFileEdit(hookData, baseAttrs) {
+  recordFileLineStats(hookData, baseAttrs, "tab");
+  handlePostToolUse(
+    {
+      ...hookData,
+      tool_name: "tab_edit",
+      duration_ms: hookData.duration_ms ?? hookData.duration,
+      cursor_lines_added: hookData.cursor_lines_added,
+      cursor_lines_removed: hookData.cursor_lines_removed
+    },
+    baseAttrs,
+    { failed: false }
+  );
+}
+
+function recordFileLineStats(hookData, baseAttrs, source) {
+  const stats = extractFileLineStats(hookData);
+  if (!stats || (stats.added === 0 && stats.removed === 0)) {
+    return;
+  }
+
+  hookData.cursor_lines_added = stats.added;
+  hookData.cursor_lines_removed = stats.removed;
+
+  const filePath = hookData.file_path;
+  const metricExtra = {
+    type: "added",
+    cursor_code_source: source,
+    file_extension: inferFileExtension(filePath)
+  };
+
+  if (stats.added > 0) {
+    linesOfCodeCounter.add(stats.added, legacyMetricLabels(baseAttrs, { ...metricExtra, type: "added" }));
+  }
+  if (stats.removed > 0) {
+    linesOfCodeCounter.add(
+      stats.removed,
+      legacyMetricLabels(baseAttrs, { ...metricExtra, type: "removed" })
+    );
   }
 }
 
 function handleSubagentStart(hookData, baseAttrs) {
+  const attribution = classifyInvocation("subagentStart", hookData, hookData.subagent_type || "subagent");
+  recordAttributionInvocation(attribution, baseAttrs, { phase: "start" });
+
   const parent = resolveParentContext(hookData, hookData.parent_conversation_id);
   const subagentId = hookData.subagent_id;
   const agentName = hookData.subagent_type || "subagent";
 
   const span = startSpan(
-    spanNameCreateAgent(agentName),
+    spanNameInvokeAgent(agentName),
     {
-      ...baseAttrs,
-      "gen_ai.operation.name": "create_agent",
-      "gen_ai.agent.id": subagentId,
-      "gen_ai.agent.name": agentName,
-      "gen_ai.request.model": hookData.subagent_model || baseAttrs["gen_ai.request.model"],
+      ...buildInvokeAgentAttributes(baseAttrs, { agentName, agentId: subagentId }),
+      "cursor.attribution.category": attribution.category,
+      "cursor.attribution.name": attribution.name,
+      "gen_ai.request.model": hookData.subagent_model || baseAttrs[ATTR_GEN_AI_REQUEST_MODEL],
       "cursor.subagent.parent_conversation_id": hookData.parent_conversation_id,
       "cursor.subagent.is_parallel_worker": hookData.is_parallel_worker ?? false
     },
@@ -384,8 +716,7 @@ function handleSubagentStop(hookData, baseAttrs) {
   if (active) {
     active.span.setAttributes(
       filterDefined({
-        "gen_ai.operation.name": "invoke_agent",
-        "gen_ai.agent.name": agentName,
+        ...buildInvokeAgentAttributes(baseAttrs, { agentName, agentId: subagentId }),
         "cursor.subagent.status": hookData.status,
         "cursor.subagent.duration_ms": hookData.duration_ms,
         "cursor.subagent.tool_call_count": hookData.tool_call_count,
@@ -394,7 +725,7 @@ function handleSubagentStop(hookData, baseAttrs) {
     );
 
     if (typeof hookData.duration_ms === "number") {
-      recordGenAiDuration(hookData.duration_ms / 1000, baseAttrs, "invoke_agent", {
+      recordGenAiDuration(hookData.duration_ms / 1000, baseAttrs, GEN_AI_OPERATION_NAME_VALUE_INVOKE_AGENT, {
         "gen_ai.agent.name": agentName
       });
     }
@@ -405,13 +736,16 @@ function handleSubagentStop(hookData, baseAttrs) {
     active.span.end();
     activeSubagents.delete(subagentId);
   } else {
-    const span = startSpan(spanNameInvokeAgent(agentName), {
-      ...baseAttrs,
-      "gen_ai.operation.name": "invoke_agent",
-      "gen_ai.agent.name": agentName,
-      "cursor.subagent.status": hookData.status,
-      "cursor.subagent.duration_ms": hookData.duration_ms
-    });
+    const span = startSpan(
+      spanNameInvokeAgent(agentName),
+      {
+        ...buildInvokeAgentAttributes(baseAttrs, { agentName, agentId: subagentId }),
+        "cursor.subagent.status": hookData.status,
+        "cursor.subagent.duration_ms": hookData.duration_ms
+      },
+      context.active(),
+      SpanKind.INTERNAL
+    );
 
     if (hookData.status === "error") {
       markSpanError(span, "subagent_error");
@@ -425,18 +759,24 @@ function handleAfterAgentResponse(hookData, baseAttrs) {
   const textLength = typeof hookData.text === "string" ? hookData.text.length : 0;
 
   if (parent.interaction) {
-    parent.interaction.span.addEvent("gen_ai.response", {
-      "gen_ai.output.type": "text",
+    parent.interaction.span.addEvent("gen_ai.client.inference.operation.details", {
+      [ATTR_GEN_AI_OUTPUT_TYPE]: "text",
       "cursor.response.length": textLength
     });
     return;
   }
 
-  const span = startSpan("gen_ai.response", {
-    ...baseAttrs,
-    "gen_ai.output.type": "text",
-    "cursor.response.length": textLength
-  }, parent.ctx);
+  const span = startSpan(
+    spanNameInvokeAgent(GEN_AI_CURSOR_AGENT_NAME),
+    {
+      ...buildInvokeAgentAttributes(baseAttrs, { agentName: GEN_AI_CURSOR_AGENT_NAME }),
+      [ATTR_GEN_AI_OUTPUT_TYPE]: "text",
+      "cursor.response.length": textLength,
+      "cursor.span.role": "response"
+    },
+    parent.ctx,
+    SpanKind.INTERNAL
+  );
   span.end();
 }
 
@@ -445,14 +785,14 @@ function handleAfterAgentThought(hookData, baseAttrs) {
   const parent = resolveParentContext(hookData);
 
   if (parent.interaction) {
-    parent.interaction.span.addEvent("gen_ai.reasoning", {
+    parent.interaction.span.addEvent("gen_ai.client.inference.operation.details", {
       "cursor.thought.duration_ms": durationMs,
-      "gen_ai.usage.reasoning.output_tokens": estimateReasoningTokens(hookData.text)
+      ...buildReasoningUsageAttributes(hookData.text)
     });
   }
 
   if (typeof durationMs === "number") {
-    recordGenAiDuration(durationMs / 1000, baseAttrs, "invoke_agent");
+    recordGenAiDuration(durationMs / 1000, baseAttrs, GEN_AI_OPERATION_NAME_VALUE_INVOKE_AGENT);
   }
 }
 
@@ -460,6 +800,10 @@ function handleStop(hookData, baseAttrs) {
   const generationId = hookData.generation_id;
   if (generationId && activeInteractions.has(generationId)) {
     const active = activeInteractions.get(generationId);
+    active.span.addEvent("gen_ai.client.inference.operation.details", {
+      "cursor.agent.status": hookData.status,
+      "cursor.agent.loop_count": hookData.loop_count
+    });
     active.span.setAttributes({
       "cursor.agent.status": hookData.status,
       "cursor.agent.loop_count": hookData.loop_count
@@ -471,43 +815,45 @@ function handleStop(hookData, baseAttrs) {
   } else {
     endInteractionForConversation(hookData.conversation_id, "stop");
   }
-
-  const span = startSpan("cursor.agent.stop", {
-    ...baseAttrs,
-    "gen_ai.operation.name": "invoke_agent",
-    "cursor.agent.status": hookData.status,
-    "cursor.agent.loop_count": hookData.loop_count
-  });
-  span.end();
 }
 
 function handlePreCompact(hookData, baseAttrs) {
   const tokens = hookData.context_tokens;
   if (typeof tokens === "number") {
-    genAiTokenUsage.record(tokens, semconvMetricLabels(baseAttrs, "invoke_agent", {
+    genAiTokenUsage.record(tokens, semconvMetricLabels(baseAttrs, GEN_AI_OPERATION_NAME_VALUE_INVOKE_AGENT, {
       "gen_ai.token.type": "input"
     }));
   }
 
   const parent = resolveParentContext(hookData);
-  const span = startSpan("cursor.compaction", {
-    ...baseAttrs,
-    "gen_ai.operation.name": "invoke_agent",
-    "gen_ai.usage.input_tokens": tokens,
-    "cursor.compaction.trigger": hookData.trigger,
-    "cursor.compaction.context_usage_percent": hookData.context_usage_percent,
-    "cursor.compaction.context_window_size": hookData.context_window_size,
-    "cursor.compaction.message_count": hookData.message_count
-  }, parent.ctx);
+  const span = startSpan(
+    spanNameInvokeAgent(GEN_AI_CURSOR_AGENT_NAME),
+    {
+      ...buildInvokeAgentAttributes(baseAttrs, { agentName: GEN_AI_CURSOR_AGENT_NAME }),
+      ...buildUsageTokenAttributes({ input: tokens, output: 0 }),
+      "cursor.compaction.trigger": hookData.trigger,
+      "cursor.compaction.context_usage_percent": hookData.context_usage_percent,
+      "cursor.compaction.context_window_size": hookData.context_window_size,
+      "cursor.compaction.message_count": hookData.message_count,
+      "cursor.span.role": "compaction"
+    },
+    parent.ctx,
+    SpanKind.INTERNAL
+  );
   span.end();
 }
 
 function recordGenericHook(hookName, hookData, baseAttrs) {
-  const span = startSpan("cursor.hook", {
-    ...baseAttrs,
-    "cursor.hook.name": hookName
-  });
-  span.addEvent("cursor.hook.received", {
+  const span = startSpan(
+    spanNameInvokeAgent(GEN_AI_CURSOR_AGENT_NAME),
+    {
+      ...buildInvokeAgentAttributes(baseAttrs, { agentName: GEN_AI_CURSOR_AGENT_NAME }),
+      "cursor.hook.name": hookName
+    },
+    context.active(),
+    SpanKind.INTERNAL
+  );
+  span.addEvent("gen_ai.client.inference.operation.details", {
     "cursor.payload_size": JSON.stringify(hookData).length
   });
   span.end();
@@ -563,34 +909,26 @@ function buildBaseAttributes(event, hookData) {
   const generationId = hookData.generation_id || event.generation_id;
   const model = hookData.model || event.model || hookData.subagent_model;
 
-  const attrs = {
+  return filterDefined({
     "cursor.hook.name": hookData.hook_event_name || event.event_name,
     "cursor.user": event.user || hookData.user_email || "unknown",
     "cursor.repo": event.repo || hookData.workspace_roots?.[0] || "unknown",
     "cursor.version": hookData.cursor_version || event.cursor_version,
-    "gen_ai.provider.name": GEN_AI_PROVIDER,
-    "gen_ai.conversation.id": conversationId,
-    "gen_ai.request.model": model,
+    [ATTR_GEN_AI_PROVIDER_NAME]: GEN_AI_PROVIDER_NAME,
+    [ATTR_GEN_AI_CONVERSATION_ID]: conversationId,
+    [ATTR_GEN_AI_REQUEST_MODEL]: model,
     "cursor.conversation.id": conversationId,
     "cursor.generation.id": generationId,
-    "cursor.user.email": hookData.user_email || event.user
-  };
-
-  attrs["gen_ai.system"] = GEN_AI_PROVIDER;
-
-  if (generationId) {
-    attrs["gen_ai.response.id"] = generationId;
-  }
-
-  return attrs;
+    "cursor.user.email": hookData.user_email || event.user,
+    [ATTR_GEN_AI_RESPONSE_ID]: generationId
+  });
 }
 
 function semconvMetricLabels(baseAttrs, operationName, extra = {}) {
   return filterDefined({
-    "gen_ai.operation.name": operationName,
-    "gen_ai.request.model": baseAttrs["gen_ai.request.model"] || "unknown",
-    "gen_ai.provider.name": baseAttrs["gen_ai.provider.name"] || GEN_AI_PROVIDER,
-    "gen_ai.system": GEN_AI_PROVIDER,
+    [ATTR_GEN_AI_OPERATION_NAME]: operationName,
+    [ATTR_GEN_AI_REQUEST_MODEL]: baseAttrs[ATTR_GEN_AI_REQUEST_MODEL] || "unknown",
+    [ATTR_GEN_AI_PROVIDER_NAME]: baseAttrs[ATTR_GEN_AI_PROVIDER_NAME] || GEN_AI_PROVIDER_NAME,
     ...extra
   });
 }
@@ -598,7 +936,7 @@ function semconvMetricLabels(baseAttrs, operationName, extra = {}) {
 function legacyMetricLabels(baseAttrs, extra = {}) {
   return {
     cursor_user: baseAttrs["cursor.user.email"] || baseAttrs["cursor.user"] || "unknown",
-    cursor_model: baseAttrs["gen_ai.request.model"] || "unknown",
+    cursor_model: baseAttrs[ATTR_GEN_AI_REQUEST_MODEL] || "unknown",
     cursor_repo: baseAttrs["cursor.repo"] || "unknown",
     ...extra
   };
@@ -616,6 +954,67 @@ function recordGenAiDuration(durationSeconds, baseAttrs, operationName, extra = 
 
 function incrementHookCounter(hookName, baseAttrs) {
   hookEventCounter.add(1, legacyMetricLabels(baseAttrs, { cursor_hook_name: hookName }));
+}
+
+function recordAttributionInvocation(attribution, baseAttrs, extra = {}) {
+  attributionInvocationCounter.add(
+    1,
+    legacyMetricLabels(baseAttrs, {
+      attribution_category: attribution.category,
+      attribution_name: attribution.name,
+      ...extra
+    })
+  );
+}
+
+/**
+ * @param {{ input: number, output: number, source?: string }} tokenEstimate
+ * @param {Record<string, string | undefined>} baseAttrs
+ * @param {{ category: string, name: string, detail?: string, operationName?: string }} attribution
+ */
+function recordAttributedContextTokens(tokenEstimate, baseAttrs, attribution) {
+  if (!trackAttributedTokens) {
+    return;
+  }
+
+  const operationName = attribution.operationName || "execute_tool";
+  const labels = {
+    attribution_category: attribution.category,
+    attribution_name: attribution.name,
+    token_source: tokenEstimate.source || "estimated"
+  };
+
+  if (tokenEstimate.input > 0) {
+    attributedContextTokensCounter.add(
+      tokenEstimate.input,
+      legacyMetricLabels(baseAttrs, { ...labels, token_type: "input" })
+    );
+    genAiTokenUsage.record(
+      tokenEstimate.input,
+      semconvMetricLabels(baseAttrs, operationName, {
+        "gen_ai.token.type": "input",
+        "cursor.attribution.category": attribution.category,
+        "cursor.attribution.name": attribution.name,
+        "cursor.attribution.token_source": tokenEstimate.source || "estimated"
+      })
+    );
+  }
+
+  if (tokenEstimate.output > 0) {
+    attributedContextTokensCounter.add(
+      tokenEstimate.output,
+      legacyMetricLabels(baseAttrs, { ...labels, token_type: "output" })
+    );
+    genAiTokenUsage.record(
+      tokenEstimate.output,
+      semconvMetricLabels(baseAttrs, operationName, {
+        "gen_ai.token.type": "output",
+        "cursor.attribution.category": attribution.category,
+        "cursor.attribution.name": attribution.name,
+        "cursor.attribution.token_source": tokenEstimate.source || "estimated"
+      })
+    );
+  }
 }
 
 function emitHookLog(hookName, hookData, baseAttrs) {
@@ -639,22 +1038,6 @@ function startSpan(name, attributes, parentCtx = context.active(), kind = SpanKi
   return tracer.startSpan(name, { kind, attributes: filterDefined(attributes) }, parentCtx);
 }
 
-function spanNameInvokeAgent(agentName) {
-  return agentName ? `invoke_agent ${agentName}` : "invoke_agent";
-}
-
-function spanNameCreateAgent(agentName) {
-  return agentName ? `create_agent ${agentName}` : "create_agent";
-}
-
-function spanNameExecuteTool(toolName) {
-  return toolName ? `execute_tool ${toolName}` : "execute_tool";
-}
-
-function spanNameChat(model) {
-  return model ? `chat ${model}` : "chat";
-}
-
 function markSpanError(span, errorType) {
   span.setAttributes({ "error.type": normalizeErrorType(errorType) });
   span.setStatus({ code: SpanStatusCode.ERROR, message: String(errorType) });
@@ -675,24 +1058,6 @@ function normalizeErrorType(value) {
   return text.length > 128 ? text.slice(0, 128) : text;
 }
 
-function inferToolType(toolName) {
-  const name = String(toolName || "").toLowerCase();
-  if (name.includes("mcp")) {
-    return "extension";
-  }
-  if (name === "shell" || name === "bash") {
-    return "function";
-  }
-  return "function";
-}
-
-function estimateReasoningTokens(text) {
-  if (typeof text !== "string" || text.length === 0) {
-    return undefined;
-  }
-  return Math.ceil(text.length / 4);
-}
-
 function pickLogFields(hookData) {
   const keys = [
     "hook_event_name",
@@ -700,6 +1065,10 @@ function pickLogFields(hookData) {
     "generation_id",
     "model",
     "tool_name",
+    "mcp_server",
+    "mcp_tool",
+    "url",
+    "command",
     "duration",
     "duration_ms",
     "status",

@@ -13,6 +13,7 @@
     "afterMCPExecution": [{ "command": ".cursor/hooks/forward.sh" }],
     "beforeReadFile": [{ "command": ".cursor/hooks/forward.sh" }],
     "afterFileEdit": [{ "command": ".cursor/hooks/forward.sh" }],
+    "afterTabFileEdit": [{ "command": ".cursor/hooks/forward.sh" }],
     "subagentStart": [{ "command": ".cursor/hooks/forward.sh" }],
     "subagentStop": [{ "command": ".cursor/hooks/forward.sh" }],
     "afterAgentResponse": [{ "command": ".cursor/hooks/forward.sh" }],

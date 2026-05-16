@@ -1,4 +1,5 @@
 import "./env.js";
+import { readFileSync } from "node:fs";
 import express from "express";
 import { maybeStartCursorApiPolling, stopCursorApiPolling } from "./cursor-api-poller.js";
 import { probeConfiguredOtlpEndpoints } from "./otlp-probe.js";
@@ -10,6 +11,10 @@ import {
   shutdownTelemetry
 } from "./telemetry.js";
 
+const appVersion = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8")
+).version;
+
 const app = express();
 const port = Number(process.env.PORT || 8787);
 
@@ -19,6 +24,7 @@ app.get("/healthz", (_req, res) => {
   res.status(200).json({
     ok: true,
     service: "cursorscope",
+    version: appVersion,
     ts: new Date().toISOString()
   });
 });

@@ -1,16 +1,21 @@
 {
   "name": "cursorscope",
-  "version": "0.2.0",
+  "version": "0.2.3",
   "private": true,
   "description": "Export Cursor IDE usage to OpenTelemetry (traces, metrics, logs) for backends like Last9",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "start": "node --env-file=.env src/server.js",
     "start:bg": "scripts/ensure-cursorscope.sh",
     "stop": "scripts/stop-cursorscope.sh",
+    "restart": "scripts/stop-cursorscope.sh && scripts/ensure-cursorscope.sh",
     "install:global-hooks": "scripts/install-global-hooks.sh",
     "uninstall:global-hooks": "scripts/uninstall-global-hooks.sh",
-    "dev": "node --env-file=.env --watch src/server.js"
+    "dev": "node --env-file=.env --watch src/server.js",
+    "test": "node scripts/run-tests.mjs",
+    "test:watch": "node --test --watch test/*.test.js",
+    "lint": "node --check $(find src test scripts -name '*.js' -type f | sort | tr '\\n' ' ')"
   },
   "engines": {
     "node": ">=20"

@@ -10,7 +10,11 @@ FORWARD_SCRIPT="$HOOKS_DIR/cursorscope-forward.sh"
 
 # Default: telemetry + auto-start hooks. Set CURSORSCOPE_HOOK_EVENTS=all for every event type.
 DEFAULT_EVENTS=(
-  sessionStart sessionEnd beforeSubmitPrompt postToolUse postToolUseFailure
+  sessionStart sessionEnd beforeSubmitPrompt
+  preToolUse postToolUse postToolUseFailure
+  beforeShellExecution afterShellExecution
+  beforeMCPExecution afterMCPExecution
+  beforeReadFile afterFileEdit afterTabFileEdit
   subagentStart subagentStop afterAgentResponse afterAgentThought stop preCompact
 )
 
@@ -33,7 +37,7 @@ fi
 
 EVENTS_CSV="${CURSORSCOPE_HOOK_EVENTS:-}"
 if [[ "$EVENTS_CSV" == "all" ]]; then
-  EVENTS_CSV="sessionStart sessionEnd beforeSubmitPrompt preToolUse postToolUse postToolUseFailure beforeShellExecution afterShellExecution beforeMCPExecution afterMCPExecution beforeReadFile afterFileEdit subagentStart subagentStop afterAgentResponse afterAgentThought stop preCompact"
+  EVENTS_CSV="sessionStart sessionEnd beforeSubmitPrompt preToolUse postToolUse postToolUseFailure beforeShellExecution afterShellExecution beforeMCPExecution afterMCPExecution beforeReadFile afterFileEdit afterTabFileEdit subagentStart subagentStop afterAgentResponse afterAgentThought stop preCompact"
 fi
 if [[ -z "$EVENTS_CSV" ]]; then
   EVENTS_CSV="${DEFAULT_EVENTS[*]}"

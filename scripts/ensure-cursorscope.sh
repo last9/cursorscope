@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start cursorscope ingestor in the background if not already healthy.
+# Start cursorscope ingestor in the background if not already healthy (matching version).
 set -euo pipefail
 
 if [[ "${CURSORSCOPE_AUTO_START:-true}" == "false" ]]; then
@@ -11,24 +11,57 @@ PORT="${PORT:-8787}"
 PID_FILE="${CURSORSCOPE_PID_FILE:-$HOME/.cursor/cursorscope.pid}"
 LOG_FILE="${CURSORSCOPE_LOG_FILE:-$HOME/.cursor/cursorscope.log}"
 HEALTH_URL="http://127.0.0.1:${PORT}/healthz"
+EXPECTED_VERSION="$(node -e "console.log(JSON.parse(require('fs').readFileSync('$CURSORSCOPE_HOME/package.json','utf8')).version)")"
+
+stop_running() {
+  if [[ -f "$PID_FILE" ]]; then
+    local pid
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      sleep 0.3
+    fi
+    rm -f "$PID_FILE"
+  fi
+}
+
+running_version() {
+  curl -sf --max-time 1 "$HEALTH_URL" 2>/dev/null | node -e "
+    let s='';
+    process.stdin.on('data',d=>s+=d);
+    process.stdin.on('end',()=>{ try { console.log(JSON.parse(s).version||''); } catch { console.log(''); } });
+  " 2>/dev/null || true
+}
 
 if curl -sf --max-time 1 "$HEALTH_URL" >/dev/null 2>&1; then
-  exit 0
+  current="$(running_version)"
+  if [[ "$current" == "$EXPECTED_VERSION" ]]; then
+    exit 0
+  fi
+  echo "cursorscope: restarting (running v${current:-?}, expected v${EXPECTED_VERSION})" >>"$LOG_FILE"
+  stop_running
 fi
 
 if [[ -f "$PID_FILE" ]]; then
   existing_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
-    # Process exists but health not ready yet — give it a moment on cold start.
     for _ in 1 2 3 4 5; do
       if curl -sf --max-time 1 "$HEALTH_URL" >/dev/null 2>&1; then
-        exit 0
+        current="$(running_version)"
+        if [[ "$current" == "$EXPECTED_VERSION" ]]; then
+          exit 0
+        fi
+        stop_running
+        break
       fi
       sleep 0.4
     done
-    exit 0
+    if [[ -f "$PID_FILE" ]]; then
+      stop_running
+    fi
+  else
+    rm -f "$PID_FILE"
   fi
-  rm -f "$PID_FILE"
 fi
 
 if [[ ! -d "$CURSORSCOPE_HOME" ]]; then
