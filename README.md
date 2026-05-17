@@ -10,7 +10,37 @@ Cursor fires lifecycle hooks (`sessionStart`, `beforeSubmitPrompt`, `preToolUse`
 
 The result is a proper distributed trace for every agent interaction: session span at the root, prompt spans as children, tool call spans underneath those, subagent spans branching off in parallel when Cursor fans out work.
 
-## Setup
+## Quick setup (recommended)
+
+One command installs to `~/.cursorscope`, writes `.env`, registers global Cursor hooks, and starts the ingestor:
+
+```bash
+npx @last9/cursorscope setup --last9
+```
+
+Interactive setup opens [Last9 → OpenTelemetry integration](https://app.last9.io/integrations?category=all&integration=OpenTelemetry) (or prints the link) so you can copy the OTLP endpoint and Basic auth token. It then asks for your base URL (default `https://otlp-aps1.last9.io`) and auth value.
+
+**Note:** The OTLP auth token is only visible to **Last9 organization admins**. If you are not an admin, ask your Last9 admin to copy it from that integration page and share it with you.
+
+Non-interactive:
+
+```bash
+npx @last9/cursorscope setup --last9 --yes \
+  --otlp-base https://otlp-aps1.last9.io \
+  --auth-token "$LAST9_OTLP_TOKEN"
+```
+
+Restart Cursor and send one Agent message.
+
+Other commands:
+
+```bash
+npx @last9/cursorscope start
+npx @last9/cursorscope status
+npx @last9/cursorscope hooks install
+```
+
+## Manual setup
 
 Install dependencies:
 

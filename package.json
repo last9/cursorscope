@@ -1,11 +1,28 @@
 {
-  "name": "cursorscope",
-  "version": "0.2.3",
-  "private": true,
+  "name": "@last9/cursorscope",
+  "version": "0.3.0",
   "description": "Export Cursor IDE usage to OpenTelemetry (traces, metrics, logs) for backends like Last9",
   "license": "MIT",
   "type": "module",
+  "bin": {
+    "cursorscope": "./bin/cursorscope.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "scripts",
+    ".env.example",
+    "otel",
+    "LICENSE",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/last9/cursorscope.git"
+  },
   "scripts": {
+    "setup": "node bin/cursorscope.js setup",
+    "setup:last9": "node bin/cursorscope.js setup --last9",
     "start": "node --env-file=.env src/server.js",
     "start:bg": "scripts/ensure-cursorscope.sh",
     "stop": "scripts/stop-cursorscope.sh",
@@ -15,7 +32,7 @@
     "dev": "node --env-file=.env --watch src/server.js",
     "test": "node scripts/run-tests.mjs",
     "test:watch": "node --test --watch test/*.test.js",
-    "lint": "node --check $(find src test scripts -name '*.js' -type f | sort | tr '\\n' ' ')"
+    "lint": "node scripts/lint.mjs"
   },
   "engines": {
     "node": ">=20"
