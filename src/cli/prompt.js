@@ -21,6 +21,28 @@ export async function promptLine(label, opts = {}) {
   return answer.trim() || defaultValue;
 }
 
+/**
+ * Like promptLine but masks input with * characters.
+ * @param {string} label
+ */
+async function promptSecret(label) {
+  const rl = createInterface({ input: stdin, output: stdout });
+  let muted = false;
+  rl._writeToOutput = (str) => {
+    if (muted) {
+      stdout.write(str.replace(/[^\r\n]/g, "*"));
+    } else {
+      stdout.write(str);
+    }
+  };
+  const p = rl.question(`${label}: `);
+  muted = true;
+  const answer = await p;
+  stdout.write("\n");
+  rl.close();
+  return answer.trim();
+}
+
 /** @typedef {{ otlpBase: string, otlpHeaders: string }} Last9Config */
 
 const DEFAULT_OTLP_BASE = "https://otlp-aps1.last9.io";
@@ -59,7 +81,7 @@ export async function promptLast9Config(opts) {
   const otlpBase = await promptLine("OTLP base URL (from Last9 integration page)", {
     defaultValue: presetBase
   });
-  const authToken = await promptLine(
+  const authToken = await promptSecret(
     "OTLP auth token (from your admin if needed; base64 or user:password)"
   );
 
