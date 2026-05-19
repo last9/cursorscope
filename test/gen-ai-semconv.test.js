@@ -46,6 +46,30 @@ describe("gen-ai-semconv", () => {
       assert.equal(attrs["gen_ai.agent.id"], "agent-1");
       assert.equal(attrs["gen_ai.provider.name"], GEN_AI_PROVIDER_NAME);
     });
+
+    it("propagates cursor.user and cursor.user.email to span attributes", () => {
+      const attrsWithUser = {
+        ...baseAttrs,
+        "cursor.user": "prathamesh@last9.io",
+        "cursor.user.email": "prathamesh@last9.io",
+        "cursor.repo": "/home/user/project"
+      };
+      const attrs = buildInvokeAgentAttributes(attrsWithUser, {
+        agentName: GEN_AI_CURSOR_AGENT_NAME
+      });
+      assert.equal(attrs["cursor.user"], "prathamesh@last9.io");
+      assert.equal(attrs["cursor.user.email"], "prathamesh@last9.io");
+      assert.equal(attrs["cursor.repo"], "/home/user/project");
+    });
+
+    it("omits cursor.user fields when not present in baseAttrs", () => {
+      const attrs = buildInvokeAgentAttributes(baseAttrs, {
+        agentName: GEN_AI_CURSOR_AGENT_NAME
+      });
+      assert.equal(attrs["cursor.user"], undefined);
+      assert.equal(attrs["cursor.user.email"], undefined);
+      assert.equal(attrs["cursor.repo"], undefined);
+    });
   });
 
   describe("resolveExecuteToolContext", () => {
