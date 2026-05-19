@@ -1,5 +1,7 @@
 # cursorscope
 
+![cursorscope](assets/hero.png)
+
 Cursor IDE generates a lot of signal — sessions, prompts, tool calls, model switches, compactions, subagents. None of that goes anywhere by default. cursorscope fixes that.
 
 It's a small Node.js service that intercepts Cursor's hook events and exports them as proper OpenTelemetry traces, metrics, and logs to any OTLP-compatible backend. You get full observability into how your team uses Cursor: which models they reach for, how long agent loops run, where tools fail, how token budgets are spent.
@@ -116,7 +118,7 @@ CURSOR_API_POLL_INTERVAL_MS=300000
 
 ## Privacy
 
-User prompts are redacted by default — only prompt length is recorded. Set `CURSOR_LOG_USER_PROMPTS=true` to include prompt text in spans and logs. API keys, bearer tokens, and email addresses are scrubbed automatically regardless of that setting.
+User prompts are redacted by default — only prompt length is recorded. Set `CURSOR_LOG_USER_PROMPTS=true` to include prompt text in spans and logs. API keys and bearer tokens are scrubbed automatically regardless of that setting. Set `CURSOR_MASK_USER_EMAIL=true` to mask the `cursor.user.email` span attribute before it reaches your OTLP backend.
 
 ## What you get
 
