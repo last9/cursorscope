@@ -52,6 +52,7 @@ import {
 } from "./gen-ai-semconv.js";
 const logUserPrompts = process.env.CURSOR_LOG_USER_PROMPTS === "true";
 const logToolDetails = process.env.CURSOR_LOG_TOOL_DETAILS === "true";
+const maskUserEmail = process.env.CURSOR_MASK_USER_EMAIL === "true";
 const trackAttributedTokens = process.env.CURSOR_TRACK_ATTRIBUTED_TOKENS !== "false";
 const flushOnStop = process.env.CURSOR_FLUSH_ON_STOP !== "false";
 const metricExportIntervalMs = Number(process.env.METRIC_EXPORT_INTERVAL_MS || 15000);
@@ -919,7 +920,7 @@ function buildBaseAttributes(event, hookData) {
     [ATTR_GEN_AI_REQUEST_MODEL]: model,
     "cursor.conversation.id": conversationId,
     "cursor.generation.id": generationId,
-    "cursor.user.email": hookData.user_email || event.user,
+    "cursor.user.email": maskUserEmail ? maskEmail(hookData.user_email || event.user) : (hookData.user_email || event.user),
     [ATTR_GEN_AI_RESPONSE_ID]: generationId
   });
 }
