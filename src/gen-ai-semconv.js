@@ -69,6 +69,9 @@ export function buildGenAiBaseAttributes(baseAttrs, extra = {}) {
     [ATTR_GEN_AI_CONVERSATION_ID]: baseAttrs[ATTR_GEN_AI_CONVERSATION_ID],
     [ATTR_GEN_AI_REQUEST_MODEL]: baseAttrs[ATTR_GEN_AI_REQUEST_MODEL],
     [ATTR_GEN_AI_RESPONSE_ID]: baseAttrs[ATTR_GEN_AI_RESPONSE_ID],
+    "cursor.user": baseAttrs["cursor.user"],
+    "cursor.user.email": baseAttrs["cursor.user.email"],
+    "cursor.repo": baseAttrs["cursor.repo"],
     ...extra
   });
 }

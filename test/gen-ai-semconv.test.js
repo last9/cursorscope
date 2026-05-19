@@ -46,6 +46,30 @@ describe("gen-ai-semconv", () => {
       assert.equal(attrs["gen_ai.agent.id"], "agent-1");
       assert.equal(attrs["gen_ai.provider.name"], GEN_AI_PROVIDER_NAME);
     });
+
+    it("propagates cursor.user and cursor.user.email to span attributes", () => {
+      const attrsWithUser = {
+        ...baseAttrs,
+        "cursor.user": "prathamesh@last9.io",
+        "cursor.user.email": "prathamesh@last9.io",
+        "cursor.repo": "/home/user/project"
+      };
+      const attrs = buildInvokeAgentAttributes(attrsWithUser, {
+        agentName: GEN_AI_CURSOR_AGENT_NAME
+      });
+      assert.equal(attrs["cursor.user"], "prathamesh@last9.io");
+      assert.equal(attrs["cursor.user.email"], "prathamesh@last9.io");
+      assert.equal(attrs["cursor.repo"], "/home/user/project");
+    });
+
+    it("omits cursor.user fields when not present in baseAttrs", () => {
+      const attrs = buildInvokeAgentAttributes(baseAttrs, {
+        agentName: GEN_AI_CURSOR_AGENT_NAME
+      });
+      assert.ok(!Object.hasOwn(attrs, "cursor.user"));
+      assert.ok(!Object.hasOwn(attrs, "cursor.user.email"));
+      assert.ok(!Object.hasOwn(attrs, "cursor.repo"));
+    });
   });
 
   describe("resolveExecuteToolContext", () => {
@@ -96,6 +120,23 @@ describe("gen-ai-semconv", () => {
       assert.equal(attrs[ATTR_GEN_AI_TOOL_TYPE], "extension");
       assert.equal(attrs["gen_ai.tool.call.id"], "tc-1");
       assert.equal(attrs["cursor.mcp.server"], "mcp.example.com");
+    });
+
+    it("propagates cursor.user and cursor.repo to execute_tool spans", () => {
+      const attrsWithUser = {
+        ...baseAttrs,
+        "cursor.user": "user@example.com",
+        "cursor.user.email": "user@example.com",
+        "cursor.repo": "/home/user/project"
+      };
+      const ctx = resolveExecuteToolContext(
+        { url: "https://mcp.example.com", tool_name: "search" },
+        "afterMCPExecution"
+      );
+      const attrs = buildExecuteToolAttributes(attrsWithUser, ctx, {});
+      assert.equal(attrs["cursor.user"], "user@example.com");
+      assert.equal(attrs["cursor.user.email"], "user@example.com");
+      assert.equal(attrs["cursor.repo"], "/home/user/project");
     });
   });
 
