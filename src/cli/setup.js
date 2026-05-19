@@ -100,7 +100,7 @@ export async function runSetup(options) {
   console.log("cursorscope is installed.");
   console.log(`  Home:    ${home}`);
   console.log(`  Logs:    ~/.cursor/cursorscope.log`);
-  console.log(`  Health:  http://127.0.0.1:8787/healthz`);
+  console.log(`  Health:  http://127.0.0.1:4327/healthz`);
   console.log("");
 
   const needsAuth =

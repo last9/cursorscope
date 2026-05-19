@@ -7,7 +7,7 @@ if [[ "${CURSORSCOPE_AUTO_START:-true}" == "false" ]]; then
 fi
 
 CURSORSCOPE_HOME="${CURSORSCOPE_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-PORT="${PORT:-8787}"
+PORT="${PORT:-4327}"
 PID_FILE="${CURSORSCOPE_PID_FILE:-$HOME/.cursor/cursorscope.pid}"
 LOG_FILE="${CURSORSCOPE_LOG_FILE:-$HOME/.cursor/cursorscope.log}"
 HEALTH_URL="http://127.0.0.1:${PORT}/healthz"

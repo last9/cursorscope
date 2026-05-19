@@ -16,7 +16,7 @@ const appVersion = JSON.parse(
 ).version;
 
 const app = express();
-const port = Number(process.env.PORT || 8787);
+const port = Number(process.env.PORT || 4327);
 
 app.use(express.json({ limit: "1mb" }));
 

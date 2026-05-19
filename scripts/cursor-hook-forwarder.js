@@ -4,7 +4,7 @@
  * Cursor hook forwarder: reads hook JSON from stdin, enriches, posts to local ingestor.
  */
 
-const hookEndpoint = process.env.CURSOR_HOOK_ENDPOINT || "http://localhost:8787/cursor/hooks";
+const hookEndpoint = process.env.CURSOR_HOOK_ENDPOINT || "http://localhost:4327/cursor/hooks";
 const readStdin =
   process.env.CURSOR_HOOK_READ_STDIN !== "false" && process.env.CURSOR_HOOK_READ_STDIN !== "0";
 

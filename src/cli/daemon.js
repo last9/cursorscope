@@ -31,7 +31,7 @@ export function runStop() {
 /** @param {{ home?: string }} [options] */
 export function runStatus(options = {}) {
   const home = resolveHome(options.home || defaultHome());
-  const port = process.env.PORT || "8787";
+  const port = process.env.PORT || "4327";
   const result = spawnSync(
     "curl",
     ["-sf", `http://127.0.0.1:${port}/healthz`],
