@@ -1,6 +1,6 @@
 {
   "name": "@last9/cursorscope",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Export Cursor IDE usage to OpenTelemetry (traces, metrics, logs) for backends like Last9",
   "license": "MIT",
   "type": "module",
