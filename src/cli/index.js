@@ -29,14 +29,17 @@ Options:
   --no-browser  Do not offer to open Last9 OpenTelemetry integration page
 
 Examples:
-  npx @last9/cursorscope setup --last9
+  npx @last9/cursorscope
   cursorscope setup && cursorscope start
 `);
 }
 
 /** @param {string[]} argv */
 export async function runCli(argv) {
-  if (!argv.length || argv[0] === "-h" || argv[0] === "--help" || argv[0] === "help") {
+  if (!argv.length) {
+    return runCli(["setup", "--last9"]);
+  }
+  if (argv[0] === "-h" || argv[0] === "--help" || argv[0] === "help") {
     printHelp();
     return 0;
   }

@@ -17,7 +17,7 @@ The result is a proper distributed trace for every agent interaction: session sp
 One command installs to `~/.cursorscope`, writes `.env`, registers global Cursor hooks, and starts the ingestor:
 
 ```bash
-npx @last9/cursorscope setup --last9
+npx @last9/cursorscope
 ```
 
 Interactive setup opens [Last9 → OpenTelemetry integration](https://app.last9.io/integrations?category=all&integration=OpenTelemetry) (or prints the link) so you can copy the OTLP endpoint and Basic auth token. It then asks for your base URL (default `https://otlp-aps1.last9.io`) and auth value.
