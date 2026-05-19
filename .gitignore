@@ -18,5 +18,8 @@ npm-debug.log*
 *.swp
 *.swo
 
+# Claude Code local settings
+.claude/
+
 # Runtime
 *.pid
