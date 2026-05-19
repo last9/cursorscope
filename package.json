@@ -5,7 +5,7 @@
   "license": "MIT",
   "type": "module",
   "bin": {
-    "cursorscope": "./bin/cursorscope.js"
+    "cursorscope": "bin/cursorscope.js"
   },
   "files": [
     "bin",
@@ -18,7 +18,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/last9/cursorscope.git"
+    "url": "git+https://github.com/last9/cursorscope.git"
   },
   "scripts": {
     "setup": "node bin/cursorscope.js setup",
