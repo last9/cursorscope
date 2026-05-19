@@ -4,7 +4,7 @@
 
 Cursor IDE generates a lot of signal — sessions, prompts, tool calls, model switches, compactions, subagents. None of that goes anywhere by default. cursorscope fixes that.
 
-It's a small Node.js service that intercepts Cursor's hook events and exports them as proper OpenTelemetry traces, metrics, and logs to any OTLP-compatible backend. You get full observability into how your team uses Cursor: which models they reach for, how long agent loops run, where tools fail, how token budgets are spent.
+It's a small Node.js service that intercepts Cursor's hook events and exports them as proper OpenTelemetry traces, metrics, and logs to **any OTLP-compatible backend** — Last9, Grafana Cloud, Honeycomb, Datadog, Jaeger, a local OpenTelemetry Collector, or anything else that speaks OTLP. You get full observability into how your team uses Cursor: which models they reach for, how long agent loops run, where tools fail, how token budgets are spent.
 
 ## How it works
 
@@ -41,6 +41,28 @@ npx @last9/cursorscope start
 npx @last9/cursorscope status
 npx @last9/cursorscope hooks install
 ```
+
+## Works with any OTLP backend
+
+cursorscope is not tied to Last9. Point it at any backend that accepts OTLP HTTP:
+
+```
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://your-backend/v1/traces
+OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=https://your-backend/v1/metrics
+OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=https://your-backend/v1/logs
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <your-token>
+```
+
+| Backend | Notes |
+|---------|-------|
+| [Last9](https://app.last9.io/integrations?category=all&integration=OpenTelemetry) | Use `npx @last9/cursorscope` for guided setup |
+| Grafana Cloud | OTLP endpoint + basic auth from your stack settings |
+| Honeycomb | `api.honeycomb.io:443`, header `x-honeycomb-team=<api-key>` |
+| Datadog | OTLP Agent endpoint `localhost:4318` via local Datadog Agent |
+| Jaeger / Tempo | Local collector or direct OTLP endpoint |
+| Local Collector | Use included `docker compose up -d` |
+
+Run `cursorscope setup` (without `--last9`) for generic interactive setup.
 
 ## Manual setup
 
