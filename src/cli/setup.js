@@ -84,7 +84,15 @@ export async function runSetup(options) {
       console.log(`Wrote ${envPath}`);
     }
   } else {
-    console.log(`Keeping existing ${envPath}`);
+    const version = readPackageVersion(home);
+    const port = process.env.PORT || "4327";
+    patchEnvFile(envPath, {
+      PORT: port,
+      CURSOR_HOOK_ENDPOINT: `http://localhost:${port}/cursor/hooks`,
+      CURSORSCOPE_HOME: home,
+      OTEL_SERVICE_VERSION: version
+    });
+    console.log(`Updated infrastructure keys in ${envPath} (credentials preserved)`);
   }
 
   if (!options.noHooks && !options.dryRun) {
@@ -168,6 +176,24 @@ function buildEnvFile(last9, home, last9Config) {
     return readFileSync(examplePath, "utf8");
   }
   return buildLast9Env(home, version).replace(/otlp-aps1\.last9\.io/g, "localhost:4318");
+}
+
+/**
+ * Patch specific keys in an existing .env file without touching other values.
+ * @param {string} envPath
+ * @param {Record<string, string>} updates
+ */
+function patchEnvFile(envPath, updates) {
+  let content = readFileSync(envPath, "utf8");
+  for (const [key, value] of Object.entries(updates)) {
+    const pattern = new RegExp(`^${key}=.*$`, "m");
+    if (pattern.test(content)) {
+      content = content.replace(pattern, `${key}=${value}`);
+    } else {
+      content += `\n${key}=${value}\n`;
+    }
+  }
+  writeFileSync(envPath, content, "utf8");
 }
 
 /** @param {string} home */
