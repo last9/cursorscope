@@ -66,9 +66,11 @@ Run `cursorscope setup` (without `--last9`) for generic interactive setup.
 
 ## Manual setup
 
-Install dependencies:
+Clone and install dependencies:
 
 ```bash
+git clone https://github.com/last9/cursorscope.git
+cd cursorscope
 npm install
 ```
 
