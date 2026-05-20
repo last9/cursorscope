@@ -167,16 +167,89 @@ cursorApiMetricGauge.addCallback((result) => {
   }
 });
 
-/** @type {Map<string, { span: import('@opentelemetry/api').Span, ctx: import('@opentelemetry/api').Context, conversationId?: string }>} */
+/** @type {Map<string, { span: import('@opentelemetry/api').Span, ctx: import('@opentelemetry/api').Context, conversationId?: string, createdAtMs: number }>} */
 const activeInteractions = new Map();
 /** @type {Map<string, string>} */
 const openGenerationByConversation = new Map();
-/** @type {Map<string, { span: import('@opentelemetry/api').Span, ctx: import('@opentelemetry/api').Context }>} */
+/** @type {Map<string, { span: import('@opentelemetry/api').Span, ctx: import('@opentelemetry/api').Context, createdAtMs: number }>} */
 const activeSubagents = new Map();
-/** @type {Map<string, { span: import('@opentelemetry/api').Span, ctx: import('@opentelemetry/api').Context }>} */
+/** @type {Map<string, { span: import('@opentelemetry/api').Span, ctx: import('@opentelemetry/api').Context, createdAtMs: number }>} */
 const activeSessions = new Map();
-/** @type {Map<string, { span: import('@opentelemetry/api').Span, ctx: import('@opentelemetry/api').Context, startHrTime: number }>} */
+/** @type {Map<string, { span: import('@opentelemetry/api').Span, ctx: import('@opentelemetry/api').Context, startHrTime: number, createdAtMs: number }>} */
 const activeToolCalls = new Map();
+
+// Tool calls and subagents are short-lived (seconds to low minutes); 5 min TTL.
+// Interactions (prompt→stop) and sessions last until the user finishes; 30 min
+// TTL handles crashes/disconnects without closing spans for legitimate long runs.
+const STALE_TOOL_TTL_MS = 5 * 60 * 1000;
+const STALE_SESSION_TTL_MS = 30 * 60 * 1000;
+const _sweepIntervalMs = Number(process.env.STALE_SWEEP_INTERVAL_MS || 60_000);
+let _staleSweepTimer = null;
+
+export function sweepStaleSpans() {
+  const now = Date.now();
+  for (const [id, entry] of activeToolCalls.entries()) {
+    if (now - entry.createdAtMs > STALE_TOOL_TTL_MS) {
+      entry.span.setAttribute("cursor.tool.stale", true);
+      entry.span.end();
+      activeToolCalls.delete(id);
+    }
+  }
+  for (const [id, entry] of activeSubagents.entries()) {
+    if (now - entry.createdAtMs > STALE_TOOL_TTL_MS) {
+      entry.span.setAttribute("cursor.subagent.stale", true);
+      entry.span.end();
+      activeSubagents.delete(id);
+    }
+  }
+  for (const [id, entry] of activeInteractions.entries()) {
+    if (now - entry.createdAtMs > STALE_SESSION_TTL_MS) {
+      entry.span.setAttribute("cursor.interaction.stale", true);
+      endInteraction(id, "stale");
+    }
+  }
+  for (const [id, entry] of activeSessions.entries()) {
+    if (now - entry.createdAtMs > STALE_SESSION_TTL_MS) {
+      entry.span.setAttribute("cursor.session.stale", true);
+      endSession(id, "stale");
+    }
+  }
+}
+
+function startStaleSweep() {
+  if (_staleSweepTimer) return;
+  _staleSweepTimer = setInterval(sweepStaleSpans, _sweepIntervalMs);
+  _staleSweepTimer.unref?.();
+}
+
+startStaleSweep();
+
+export const _testHooks = {
+  backdateToolCall(toolUseId, ageMs) {
+    const entry = activeToolCalls.get(toolUseId);
+    if (entry) entry.createdAtMs = Date.now() - ageMs;
+  },
+  backdateSubagent(subagentId, ageMs) {
+    const entry = activeSubagents.get(subagentId);
+    if (entry) entry.createdAtMs = Date.now() - ageMs;
+  },
+  backdateInteraction(generationId, ageMs) {
+    const entry = activeInteractions.get(generationId);
+    if (entry) entry.createdAtMs = Date.now() - ageMs;
+  },
+  backdateSession(sessionId, ageMs) {
+    const entry = activeSessions.get(sessionId);
+    if (entry) entry.createdAtMs = Date.now() - ageMs;
+  },
+  getActiveMapSizes() {
+    return {
+      toolCalls: activeToolCalls.size,
+      subagents: activeSubagents.size,
+      interactions: activeInteractions.size,
+      sessions: activeSessions.size
+    };
+  }
+};
 
 function endSession(sessionId, reason) {
   if (!sessionId) {
@@ -316,7 +389,7 @@ function handleSessionStart(hookData, baseAttrs) {
 
   if (sessionId) {
     const ctx = trace.setSpan(context.active(), span);
-    activeSessions.set(sessionId, { span, ctx });
+    activeSessions.set(sessionId, { span, ctx, createdAtMs: Date.now() });
   } else {
     span.end();
   }
@@ -362,7 +435,7 @@ function handleBeforeSubmitPrompt(hookData, baseAttrs) {
   const ctx = trace.setSpan(context.active(), span);
 
   if (generationId) {
-    activeInteractions.set(generationId, { span, ctx, conversationId });
+    activeInteractions.set(generationId, { span, ctx, conversationId, createdAtMs: Date.now() });
     if (conversationId) {
       openGenerationByConversation.set(conversationId, generationId);
     }
@@ -428,7 +501,7 @@ function beginExecuteToolSpan(hookData, baseAttrs, parentCtx, hookName, toolName
 
   const span = startSpan(spanNameExecuteTool(toolContext.genAiToolName), attrs, parentCtx, SpanKind.INTERNAL);
   const ctx = trace.setSpan(parentCtx, span);
-  activeToolCalls.set(toolUseId, { span, ctx, startHrTime: performance.now() });
+  activeToolCalls.set(toolUseId, { span, ctx, startHrTime: performance.now(), createdAtMs: Date.now() });
 }
 
 /**
@@ -454,6 +527,7 @@ function endExecuteToolSpan(hookData, baseAttrs, parentCtx, options) {
     ...buildUsageTokenAttributes(tokenEstimate),
     "cursor.tool.success": !failed,
     "cursor.tool.duration_ms": resolvedDurationMs,
+    "cursor.tool.exit_code": typeof hookData.exit_code === "number" ? hookData.exit_code : undefined,
     "cursor.tool.failure_type": hookData.failure_type,
     "cursor.tool.error_message": hookData.error_message,
     "cursor.lines.added": hookData.cursor_lines_added,
@@ -549,12 +623,9 @@ function handleBeforeMcpExecution(hookData, baseAttrs) {
   const mcpTool = resolveMcpTool(hookData);
   const attribution = classifyInvocation("beforeMCPExecution", hookData, `mcp:${mcpServer}/${mcpTool}`);
 
+  // Only record invocation phase here; token attribution deferred to afterMCPExecution
+  // which has actual result_json and avoids double-counting input tokens.
   recordAttributionInvocation(attribution, baseAttrs, { phase: "pre" });
-  recordAttributedContextTokens(
-    { input: estimateTokens(hookData.tool_input), output: 0, source: "estimated" },
-    baseAttrs,
-    attribution
-  );
 
   handlePreToolUse(
     {
@@ -705,7 +776,7 @@ function handleSubagentStart(hookData, baseAttrs) {
 
   const ctx = trace.setSpan(parent.ctx, span);
   if (subagentId) {
-    activeSubagents.set(subagentId, { span, ctx });
+    activeSubagents.set(subagentId, { span, ctx, createdAtMs: Date.now() });
   }
 }
 
@@ -1151,6 +1222,12 @@ export function getOtelExportConfig() {
 }
 
 export function shutdownTelemetry() {
+  if (_staleSweepTimer) {
+    clearInterval(_staleSweepTimer);
+    _staleSweepTimer = null;
+  }
+  sweepStaleSpans();
+
   for (const [generationId] of activeInteractions) {
     endInteraction(generationId, "shutdown");
   }
