@@ -20,15 +20,15 @@ One command installs to `~/.cursorscope`, writes `.env`, registers global Cursor
 npx @last9/cursorscope
 ```
 
-Interactive setup opens [Last9 → OpenTelemetry integration](https://app.last9.io/integrations?category=all&integration=OpenTelemetry) (or prints the link) so you can copy the OTLP endpoint and Basic auth token. It then asks for your base URL (default `https://otlp-aps1.last9.io`) and auth value.
+Interactive setup opens [Last9 → OpenTelemetry integration](https://app.last9.io/integrations?category=all&integration=OpenTelemetry) (or prints the link) so you can copy the OTLP endpoint and Basic auth token. It then asks for your base URL and auth value.
 
 **Note:** The OTLP auth token is only visible to **Last9 organization admins**. If you are not an admin, ask your Last9 admin to copy it from that integration page and share it with you.
 
 Non-interactive:
 
 ```bash
-npx @last9/cursorscope setup --last9 --yes \
-  --otlp-base https://otlp-aps1.last9.io \
+npx @last9/cursorscope setup --last9 \
+  --otlp-base <your-last9-otlp-endpoint> \
   --auth-token "$LAST9_OTLP_TOKEN"
 ```
 
