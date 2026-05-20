@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-05-20
+
+### Fixed
+
+- **Memory leak**: `activeToolCalls`, `activeSubagents`, `activeInteractions`, and `activeSessions` Maps now have TTL-based stale sweep. A 60-second interval closes tool/subagent spans older than 5 minutes and interaction/session spans older than 30 minutes, preventing unbounded memory growth when Cursor drops post-hook events. Sweep also runs on shutdown. Configurable via `STALE_SWEEP_INTERVAL_MS`.
+- **MCP token double-count**: `handleBeforeMcpExecution` was recording estimated input tokens via `recordAttributedContextTokens`, then `handleAfterMcpExecution` counted them again. Input token attribution is now deferred exclusively to the `after` hook where actual result data is available, fixing inflated `cursor_attributed_context_tokens_total` values for MCP calls.
+- **Shell exit code lost**: `exit_code` from `afterShellExecution` was used for pass/fail classification but never stored. `cursor.tool.exit_code` is now a span attribute, enabling trace queries that distinguish failure types (e.g. timeout=124, permission denied=126, not found=127).
+
 ## [0.3.6] - 2026-05-20
 
 ### Fixed
