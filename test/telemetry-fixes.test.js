@@ -12,6 +12,7 @@ describe("telemetry bug fixes", () => {
     process.env.CURSOR_LOG_TOOL_DETAILS = "false";
     process.env.CURSOR_LOG_USER_PROMPTS = "false";
     process.env.METRIC_EXPORT_INTERVAL_MS = "3600000";
+    process.env.STALE_SWEEP_INTERVAL_MS = "3600000"; // prevent timer from firing during tests
     process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://127.0.0.1:9/v1/traces";
     process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = "http://127.0.0.1:9/v1/metrics";
     process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = "http://127.0.0.1:9/v1/logs";
@@ -135,6 +136,49 @@ describe("telemetry bug fixes", () => {
         telemetry._testHooks.getActiveMapSizes().subagents,
         before - 1,
         "stale subagent span should be removed"
+      );
+    });
+
+    it("sweepStaleSpans removes stale activeInteractions (prompt spans)", () => {
+      telemetry.recordHookEvent({
+        hook_event_name: "beforeSubmitPrompt",
+        conversation_id: "conv-stale-interaction",
+        generation_id: "gen-stale-interaction",
+        model: "claude-sonnet-4-20250514",
+        user_email: "test@example.com"
+      });
+
+      const before = telemetry._testHooks.getActiveMapSizes().interactions;
+      assert.ok(before >= 1, "interaction should be tracked after beforeSubmitPrompt");
+
+      telemetry._testHooks.backdateInteraction("gen-stale-interaction", 31 * 60 * 1000);
+      telemetry.sweepStaleSpans();
+
+      assert.equal(
+        telemetry._testHooks.getActiveMapSizes().interactions,
+        before - 1,
+        "stale interaction span should be removed"
+      );
+    });
+
+    it("sweepStaleSpans removes stale activeSessions", () => {
+      telemetry.recordHookEvent({
+        hook_event_name: "sessionStart",
+        session_id: "session-stale-1",
+        composer_mode: "agent",
+        user_email: "test@example.com"
+      });
+
+      const before = telemetry._testHooks.getActiveMapSizes().sessions;
+      assert.ok(before >= 1, "session should be tracked after sessionStart");
+
+      telemetry._testHooks.backdateSession("session-stale-1", 31 * 60 * 1000);
+      telemetry.sweepStaleSpans();
+
+      assert.equal(
+        telemetry._testHooks.getActiveMapSizes().sessions,
+        before - 1,
+        "stale session span should be removed"
       );
     });
   });
