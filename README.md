@@ -145,16 +145,29 @@ docker compose up -d
 
 This starts `otel/opentelemetry-collector-contrib` on `localhost:4317` (gRPC) and `localhost:4318` (HTTP). The local config (`otel/collector.local.yaml`) sends everything to the debug exporter so you can see what's being emitted. Swap in `otel/collector.last9.yaml` or write your own to route to a real backend.
 
-## Cursor Admin API polling
+## Cursor billing and activity API polling
 
-Cursor Business accounts can unlock team-level daily usage metrics — requests, tokens, model breakdowns — exported as OTel gauges:
+cursorscope can poll Cursor usage APIs on a schedule and export **calendar-day gauges** (idempotent re-poll — not cumulative counters). This is separate from hook-estimated `cursor_attributed_context_tokens_total`, which does **not** reconcile with Cursor billing.
 
-```
+| Plane | Source | Metrics |
+|-------|--------|---------|
+| **Billing** | Admin `filtered-usage-events` or opt-in dashboard session | `cursor.billing.charged_usd`, token breakdowns, `cursor.billing.events_total`, … |
+| **Activity** | Admin `daily-usage-data` only | `cursor.activity.agent_requests`, `cursor.activity.chat_requests`, … |
+
+```bash
 ENABLE_CURSOR_API_POLLING=true
-CURSOR_ADMIN_API_KEY=<your-key>
-CURSOR_TEAM_ID=<your-team-id>
-CURSOR_API_POLL_INTERVAL_MS=300000
+CURSOR_ADMIN_API_KEY=<enterprise-admin-key>
+CURSOR_BILLING_SOURCE=auto          # auto | admin | dashboard
+CURSOR_API_POLL_INTERVAL_MS=3600000 # 1 hour default
+CURSOR_BILLING_TIMEZONE=UTC
+CURSOR_BILLING_LOOKBACK_DAYS=30
+CURSOR_BILLING_REFRESH_DAYS=3
+
+# Individual users without Admin API (reads local Cursor session from state.vscdb only):
+ENABLE_CURSOR_DASHBOARD_POLLING=true
 ```
+
+See `docs/adr/0001-billing-day-gauges.md` for why billing uses day gauges instead of per-event counters.
 
 ## Privacy
 
@@ -164,7 +177,7 @@ User prompts are redacted by default — only prompt length is recorded. Set `CU
 
 **Traces** — one root span per session, one span per prompt/generation, tool call spans as children with duration and success/failure, subagent spans branching from parent conversations.
 
-**Metrics** — `cursor_hook_events_total`, `cursor_session_total`, `cursor_prompt_total`, `cursor_tool_executions_total`, `gen_ai.client.operation.duration`, `gen_ai.client.token.usage`, `cursor_api_metric_value` (Admin API polling).
+**Metrics** — hook counters (`cursor_hook_events_total`, `cursor_attributed_context_tokens_total`, …), GenAI histograms, and optional API day gauges (`cursor.billing.*`, `cursor.activity.*`).
 
 **Logs** — one structured log record per hook event with conversation ID, model, and hook-specific fields.
 
