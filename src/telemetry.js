@@ -39,6 +39,13 @@ import {
   GEN_AI_OPERATION_NAME_VALUE_INVOKE_AGENT
 } from "@opentelemetry/semantic-conventions/incubating";
 import {
+  clearDayGaugeStore,
+  getDayGaugeStore,
+  registerDayGauges,
+  setActivityDayGauge,
+  setBillingDayGauge
+} from "./day-gauges.js";
+import {
   buildExecuteToolAttributes,
   buildInvokeAgentAttributes,
   buildReasoningUsageAttributes,
@@ -152,20 +159,7 @@ const genAiTokenUsage = meter.createHistogram("gen_ai.client.token.usage", {
   unit: "{token}"
 });
 
-const cursorApiMetricGauge = meter.createObservableGauge("cursor_api_metric_value", {
-  description: "Numeric Cursor Admin API values",
-  unit: "1"
-});
-
-const apiGaugeStore = new Map();
-cursorApiMetricGauge.addCallback((result) => {
-  for (const [key, entry] of apiGaugeStore.entries()) {
-    result.observe(entry.value, entry.attributes);
-    if (entry.ttlEpochMs < Date.now()) {
-      apiGaugeStore.delete(key);
-    }
-  }
-});
+registerDayGauges(meter);
 
 /** @type {Map<string, { span: import('@opentelemetry/api').Span, ctx: import('@opentelemetry/api').Context, conversationId?: string, createdAtMs: number }>} */
 const activeInteractions = new Map();
@@ -225,6 +219,8 @@ function startStaleSweep() {
 startStaleSweep();
 
 export const _testHooks = {
+  getDayGaugeStore,
+  clearDayGaugeStore,
   backdateToolCall(toolUseId, ageMs) {
     const entry = activeToolCalls.get(toolUseId);
     if (entry) entry.createdAtMs = Date.now() - ageMs;
@@ -1171,17 +1167,7 @@ function normalizeHookName(name) {
   return map[name] || name;
 }
 
-export function observeCursorApiMetric(metricName, value, attributes = {}) {
-  const key = `${metricName}:${JSON.stringify(attributes)}`;
-  apiGaugeStore.set(key, {
-    value,
-    ttlEpochMs: Date.now() + 5 * 60 * 1000,
-    attributes: {
-      cursor_metric_name: metricName,
-      ...attributes
-    }
-  });
-}
+export { setBillingDayGauge, setActivityDayGauge };
 
 export function flushTelemetry() {
   return Promise.allSettled([

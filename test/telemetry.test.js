@@ -80,12 +80,21 @@ describe("telemetry", () => {
     assert.equal(result.shouldFlush, false);
   });
 
-  it("observeCursorApiMetric accepts gauge updates", () => {
-    assert.doesNotThrow(() => {
-      telemetry.observeCursorApiMetric("cursor_team_tokens", 42, {
-        cursor_date: "2026-05-16"
-      });
-    });
+  it("setBillingDayGauge stores idempotent day gauge values", () => {
+    const labels = {
+      "cursor.billing_day": "2026-06-28",
+      "gen_ai.request.model": "claude-sonnet",
+      "cursor.billing.kind": "usage",
+      "cursor.is_headless": "false",
+      "cursor.user.email": "test@example.com",
+      "cursor.billing.source": "admin_api",
+      "cursor.chargeable": "true"
+    };
+    telemetry.setBillingDayGauge("cursor.billing.charged_usd", 1.5, labels);
+    telemetry.setBillingDayGauge("cursor.billing.charged_usd", 2.0, labels);
+    const store = telemetry._testHooks.getDayGaugeStore().billing;
+    const entry = [...store.values()].find((item) => item.value === 2.0);
+    assert.ok(entry);
   });
 
   it("getOtelExportConfig exposes service and endpoints", () => {
