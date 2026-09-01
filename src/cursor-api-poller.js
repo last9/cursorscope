@@ -1,89 +1,86 @@
-import { observeCursorApiMetric } from "./telemetry.js";
+import {
+  advanceCheckpoint,
+  getCheckpointPath,
+  loadCheckpoint,
+  resolvePollWindow
+} from "./cursor-api-checkpoint.js";
+import { pollActivityMetrics } from "./cursor-activity-poller.js";
+import { resolveBillingSource, shouldRunActivityPoll, getBillingPollConfig } from "./cursor-billing-config.js";
+import { pollBillingMetrics } from "./cursor-billing-poller.js";
+import { setActivityDayGauge, setBillingDayGauge } from "./telemetry.js";
 
-const baseUrl = process.env.CURSOR_API_BASE_URL || "https://api.cursor.com";
-const adminApiKey = process.env.CURSOR_ADMIN_API_KEY;
 const pollEnabled = process.env.ENABLE_CURSOR_API_POLLING === "true";
-const pollIntervalMs = Number(process.env.CURSOR_API_POLL_INTERVAL_MS || 300000);
+const pollIntervalMs = Number(process.env.CURSOR_API_POLL_INTERVAL_MS || 3_600_000);
 
 let pollTimer;
+let pollInFlight = false;
 
 export function maybeStartCursorApiPolling() {
   if (!pollEnabled) {
     return;
   }
-  if (!adminApiKey) {
-    console.warn("ENABLE_CURSOR_API_POLLING=true, but CURSOR_ADMIN_API_KEY is missing.");
+
+  const source = resolveBillingSource();
+  if (!source) {
+    console.warn(
+      "ENABLE_CURSOR_API_POLLING=true, but no billing source is configured (set CURSOR_ADMIN_API_KEY and/or ENABLE_CURSOR_DASHBOARD_POLLING=true)."
+    );
     return;
   }
 
-  pollOnce().catch((error) => {
+  runPollTick().catch((error) => {
     console.error("Cursor API poll failed:", error.message);
   });
 
   pollTimer = setInterval(() => {
-    pollOnce().catch((error) => {
+    runPollTick().catch((error) => {
       console.error("Cursor API poll failed:", error.message);
     });
   }, pollIntervalMs);
+  pollTimer.unref?.();
 }
 
 export function stopCursorApiPolling() {
   if (pollTimer) {
     clearInterval(pollTimer);
+    pollTimer = undefined;
   }
 }
 
-async function pollOnce() {
-  const teamId = process.env.CURSOR_TEAM_ID;
-  if (!teamId) {
-    console.warn("Skipping Cursor API poll because CURSOR_TEAM_ID is not set.");
-    return;
+export async function runPollTick(options = {}) {
+  if (pollInFlight) {
+    return { skipped: true, reason: "in_flight" };
   }
 
-  // This endpoint may evolve. Keep this helper easy to customize.
-  const usageUrl = new URL(`/teams/${teamId}/daily-usage-data`, baseUrl);
-  const response = await fetch(usageUrl, {
-    headers: {
-      Authorization: `Bearer ${adminApiKey}`
-    }
+  const source = resolveBillingSource();
+  if (!source) {
+    return { skipped: true, reason: "no_source" };
+  }
+
+  pollInFlight = true;
+  const config = getBillingPollConfig();
+  const checkpointPath = options.checkpointPath ?? getCheckpointPath();
+  const checkpoint = loadCheckpoint(checkpointPath);
+  const nowMs = options.nowMs ?? Date.now();
+  const window = resolvePollWindow(checkpoint, nowMs, {
+    lookbackDays: config.lookbackDays,
+    refreshDays: config.refreshDays
   });
 
-  if (!response.ok) {
-    throw new Error(`Cursor API ${response.status} ${response.statusText}`);
-  }
+  try {
+    await pollBillingMetrics(window, source, setBillingDayGauge, {
+      fetchImpl: options.fetchImpl
+    });
 
-  const payload = await response.json();
-  const rows = normalizeDailyUsageRows(payload);
-
-  for (const row of rows) {
-    for (const [metricName, value] of Object.entries(row.numericMetrics)) {
-      observeCursorApiMetric(metricName, value, {
-        cursor_team_id: teamId,
-        cursor_date: row.date
+    if (shouldRunActivityPoll(source)) {
+      await pollActivityMetrics(window, setActivityDayGauge, {
+        fetchImpl: options.fetchImpl
       });
     }
-  }
-}
 
-function normalizeDailyUsageRows(payload) {
-  if (Array.isArray(payload)) {
-    return payload.map((item) => normalizeRow(item));
+    advanceCheckpoint(checkpointPath, nowMs);
+    return { ok: true, source, window };
+  } finally {
+    pollInFlight = false;
   }
-  if (Array.isArray(payload?.data)) {
-    return payload.data.map((item) => normalizeRow(item));
-  }
-  return [];
-}
-
-function normalizeRow(item) {
-  const date = item.date || item.day || "unknown";
-  const numericMetrics = {};
-
-  for (const [key, value] of Object.entries(item || {})) {
-    if (typeof value === "number") {
-      numericMetrics[`cursor_api_${key}`] = value;
-    }
-  }
-
-  return { date, numericMetrics };
 }

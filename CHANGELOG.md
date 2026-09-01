@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Billing plane**: calendar-day OTLP gauges from Cursor `filtered-usage-events` (`cursor.billing.*`) using `chargedCents`, token breakdowns, `cursor.is_headless`, and `cursor.chargeable` labels.
+- **Activity plane**: admin-only `daily-usage-data` day gauges (`cursor.activity.*`) keyed by `cursor.billing_day` and `cursor.user.email`.
+- Opt-in **dashboard session fallback** (`ENABLE_CURSOR_DASHBOARD_POLLING`) for individual users without an Enterprise Admin API key.
+- Sliding poll window with checkpoint file (`$CURSORSCOPE_HOME/.cursor-api-checkpoint.json`).
+
+### Changed
+
+- Admin API polling now uses **POST + Basic auth** on documented `/teams/*` paths (replaces broken GET + Bearer poller).
+- Default `CURSOR_API_POLL_INTERVAL_MS` is **3600000** (1 hour).
+
+### Removed
+
+- `cursor_api_metric_value` / `observeCursorApiMetric` — replaced by named `cursor.billing.*` and `cursor.activity.*` day gauges.
 ## [0.3.7] - 2026-05-20
 
 ### Fixed
