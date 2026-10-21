@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Node.js 22.23.4+, 24.22.1+ or 26.12.1+ required**: these are the first releases that reject TLS chains through the compromised eMudhra intermediates. Dropped Node 20, which is end-of-life and will not receive that fix (#11). CI tests exactly these releases; `.nvmrc` pins 24.22.1.
+
 ## [0.3.7] - 2026-05-20
 
 ### Fixed

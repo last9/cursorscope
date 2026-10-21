@@ -181,4 +181,4 @@ GET  /debug/otlp-probe      — probe connectivity to all configured OTLP endpoi
 
 ## Requirements
 
-Node.js 20 or later. No build step.
+Node.js 22.23.4+, 24.22.1+ or 26.12.1+. These are the first releases on each line that reject TLS chains through the compromised eMudhra intermediates, which matters because exports go over OTLP/HTTPS. No build step.

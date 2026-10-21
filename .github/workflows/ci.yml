@@ -16,7 +16,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Install dependencies
@@ -27,6 +27,10 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # The engines.node floors (eMudhra-patched); test/node-runtime.test.js keeps them in sync.
+        node-version: ["22.23.4", "24.22.1", "26.12.1"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,7 +38,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: ${{ matrix.node-version }}
           cache: npm
 
       - name: Install dependencies
