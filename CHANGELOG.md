@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Node.js 22+ required**: dropped Node 20, which is end-of-life and will not receive the TLS blocklist for the compromised eMudhra intermediates (#11). CI now tests Node 22, 24 and 26.
+
 ## [0.3.7] - 2026-05-20
 
 ### Fixed

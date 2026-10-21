@@ -181,4 +181,4 @@ GET  /debug/otlp-probe      — probe connectivity to all configured OTLP endpoi
 
 ## Requirements
 
-Node.js 20 or later. No build step.
+Node.js 22 or later, on a supported release line. No build step.

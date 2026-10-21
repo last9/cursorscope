@@ -35,7 +35,7 @@
     "lint": "node scripts/lint.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
