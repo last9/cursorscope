@@ -16,7 +16,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Install dependencies
@@ -29,8 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # Supported release lines; keep in sync with package.json engines.
-        node-version: ["22", "24", "26"]
+        # The engines.node floors (eMudhra-patched); test/node-runtime.test.js keeps them in sync.
+        node-version: ["22.23.4", "24.22.1", "26.12.1"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4

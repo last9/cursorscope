@@ -20,6 +20,14 @@ describe("node runtime pins", () => {
     assert.ok(PATCHED.includes(read(".nvmrc").trim()));
   });
 
+  it("CI runs exactly the patched releases", () => {
+    const ci = read(".github/workflows/ci.yml");
+    const matrix = ci.match(/node-version: \[(.*)\]/)[1].split(",").map((v) => JSON.parse(v));
+    assert.deepEqual(matrix, PATCHED);
+    const pinned = [...ci.matchAll(/node-version: "([^"]+)"/g)].map((m) => m[1]);
+    assert.ok(pinned.length > 0 && pinned.every((v) => PATCHED.includes(v)), pinned.join(","));
+  });
+
   it("README Requirements names every patched release", () => {
     const requirements = read("README.md").split("## Requirements")[1];
     for (const version of PATCHED) assert.ok(requirements.includes(version), version);
