@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-10-22
+
 ### Changed
 
 - **Node.js 22.23.4+, 24.22.1+ or 26.12.1+ required**: these are the first releases that reject TLS chains through the compromised eMudhra intermediates. Dropped Node 20, which is end-of-life and will not receive that fix (#11). CI tests exactly these releases; `.nvmrc` pins 24.22.1.
@@ -72,7 +74,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - npm setup CLI with Last9 install wizard (`cursorscope setup --last9`).
 - OSS readiness files (LICENSE, CODE_OF_CONDUCT, CONTRIBUTING, SECURITY).
 
-[Unreleased]: https://github.com/last9/cursorscope/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/last9/cursorscope/compare/v0.3.8...HEAD
+[0.3.8]: https://github.com/last9/cursorscope/compare/v0.3.7...v0.3.8
+[0.3.7]: https://github.com/last9/cursorscope/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/last9/cursorscope/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/last9/cursorscope/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/last9/cursorscope/compare/v0.3.3...v0.3.4
