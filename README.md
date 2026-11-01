@@ -8,7 +8,7 @@ It's a small Node.js service that intercepts Cursor's hook events and exports th
 
 ## How it works
 
-Cursor fires lifecycle hooks (`sessionStart`, `beforeSubmitPrompt`, `preToolUse`, etc.) as JSON on stdin to a shell script. That script hands the payload to a Node forwarder, which posts it to a local HTTP ingestor. The ingestor maps hook events onto OTel spans — correlating by conversation ID and generation ID so tool calls nest correctly inside their parent prompt spans — and exports everything via OTLP.
+Cursor fires lifecycle hooks (`sessionStart`, `beforeSubmitPrompt`, `preToolUse`, etc.) as JSON on stdin to a shell script. That script returns a permissive response, drains stdin through EOF, and sends the payload to the local HTTP ingestor with background `curl`. Payload enrichment runs in the ingestor; ordinary hooks start no Node process and make no health requests. The ingestor maps hook events onto OTel spans — correlating by conversation ID and generation ID so tool calls nest correctly inside their parent prompt spans — and exports everything via OTLP.
 
 The result is a proper distributed trace for every agent interaction: session span at the root, prompt spans as children, tool call spans underneath those, subagent spans branching off when Cursor fans out work.
 
@@ -118,13 +118,83 @@ npm run stop                    # stop the background ingestor
 npm run uninstall:global-hooks  # remove only cursorscope hook entries
 ```
 
-Set `CURSORSCOPE_AUTO_START=false` in `.env` if you prefer `npm start` by hand.
+Startup and version checks run in the background only on `sessionStart`. Export `CURSORSCOPE_AUTO_START=false` in Cursor's environment if you prefer `npm start` by hand. If the daemon stops during a session, start it manually or open a new session.
 
-Register all hook types (optional): `CURSORSCOPE_HOOK_EVENTS=all npm run install:global-hooks`
+### Choose forwarded events
+
+The lean default includes session, prompt, tool, shell, MCP, subagent, file-edit, response, stop, and compaction events. `afterAgentThought`, `beforeReadFile`, and `afterTabFileEdit` are opt-in; omitting them reduces telemetry volume and per-event work. Tool start/end pairs remain enabled.
+
+```bash
+# All 19 supported events, including thought/read/tab events
+CURSORSCOPE_HOOK_EVENTS=all npm run install:global-hooks
+
+# Explicit selection: whitespace or commas separate event names
+CURSORSCOPE_HOOK_EVENTS='sessionStart,sessionEnd,beforeSubmitPrompt,preToolUse,postToolUse,postToolUseFailure,stop' npm run install:global-hooks
+
+# Restore the lean default
+npm run install:global-hooks
+```
+
+The same environment variable works with `npx @last9/cursorscope hooks install`. Reinstalling replaces cursorscope's previous selection, including removing deselected events, and preserves other hooks. Keep `sessionStart` in custom selections for automatic startup, and keep start/end pairs for complete spans. Unknown event names are rejected.
+
+After upgrading, **reinstall hooks and restart the ingestor** (`npm run restart`, or the CLI's `stop` then `start`). The installed commands now pass the event name explicitly. Custom commands should invoke `scripts/cursorscope-forward.sh EVENT`; the legacy JS entry remains compatible but still starts Node.
+
+### Delivery and latency
+
+Permission hooks return `{"permission":"allow"}`, prompt submission returns `{"continue":true}`, and other events return `{}`. Network and startup failures never deny a Cursor action. These responses follow the [Cursor hook schemas](https://cursor.com/docs/hooks).
+
+Forwarding is best effort: no durable queue or retry. The sender drains stdin before exiting, capped at 1 MiB. Payloads under 1 KiB use a bounded shell read without a temporary file; larger inputs use a private temporary file and buffered reads. Each read stage has a one-second safety deadline for a stuck producer (up to two seconds total); incomplete or oversized input is dropped. Reading large inputs takes longer than the small-payload benchmark below. The HTTP request runs after stdin is drained, in the background, with a 200 ms connection timeout and 500 ms total timeout. The temporary file is removed after delivery or failure. Output pipes are closed so Cursor does not wait for HTTP completion. Events during daemon startup or an outage may be lost; start the ingestor before a session when capturing its earliest events matters.
+
+Detached requests can arrive out of order. Tool, prompt, subagent, and session completions are exported immediately; the ingestor keeps separate histories of up to 10,000 completed IDs per lifecycle kind for five minutes and ignores late starts for those IDs, preventing duplicate open spans. IDs in one lifecycle kind do not suppress starts in another. A prompt completion received first preserves its status and loop count in a completion-only span; it does not infer the missing prompt duration. A completion received without its start retains completion fields but cannot recover start-only attributes.
+
+`CURSOR_HOOK_ENDPOINT` overrides the destination; otherwise it is `http://127.0.0.1:${PORT:-4327}/cursor/hooks`. The updated ingestor accepts form-encoded `hook_input`, `user`, `repo`, and `event`, reconstructs the same telemetry fields (including all original input under `data`), and stamps receipt time. Existing JSON envelopes remain accepted. Point custom endpoints at an ingestor that supports the new transport.
+
+### Hook benchmark
+
+From the repository root:
+
+```bash
+# Install hooks in a temporary HOME and test against an isolated healthy HTTP sink
+CURSORSCOPE_HOOK_EVENTS=all node scripts/benchmark-hooks.js --runs 30 --budget-ms 20
+
+# Overlap senders without waiting for background delivery between samples
+CURSORSCOPE_HOOK_EVENTS=all node scripts/benchmark-hooks.js --runs 30 --burst --budget-ms 75
+
+# Optional: execute every command in an existing hooks file (including custom hooks)
+node scripts/benchmark-hooks.js --hooks "$HOME/.cursor/hooks.json" --runs 30
+```
+
+The JSON report includes p50/p95 wall time per command and health/event request counts. Timing includes process startup, stdin, exit, and output-pipe closure, but excludes background delivery. By default the generated-hook benchmark waits for delivery **outside** each timed sample before starting the next; `--burst` measures overlapping senders. `--hooks` executes the supplied commands without this delivery barrier. The fixture exports no OTLP data and does not start a real daemon; it isolates forwarding cost. A missed delivery or exceeded budget fails the generated-hook benchmark.
+
+Measured on a shared Linux runner with Node 24.22.1, 30 small sample payloads per event, healthy fixture: the isolated-call **p95 budget is 20 ms**. Before is the original Node forwarding chain; after uses the shell sender with its small-payload builtin read. All 570 events arrived in both runs; health requests fell from 1,140 to 30 (one per `sessionStart`). The slowest isolated p95 in that run was 14.4 ms, within the 20 ms budget. Separate isolated review runs exceeded 20 ms, so these measurements do not establish repeatable compliance with the acceptance budget. Before the small-payload path, the buffered sender reached 24.3 ms in the same command during this review. Test spies also verify that none of the installed hook commands starts Node against a healthy ingestor.
+
+| Event | Before p50 / p95 (ms) | After p50 / p95 (ms) |
+|---|---:|---:|
+| `sessionStart` | 358.7 / 402.6 | 10.4 / 13.1 |
+| `sessionEnd` | 355.9 / 417.7 | 9.8 / 11.5 |
+| `beforeSubmitPrompt` | 349.5 / 387.8 | 10.3 / 12.5 |
+| `preToolUse` | 350.4 / 382.9 | 9.8 / 13.1 |
+| `postToolUse` | 348.4 / 405.8 | 10.0 / 11.9 |
+| `postToolUseFailure` | 347.3 / 386.8 | 10.4 / 12.1 |
+| `beforeShellExecution` | 363.4 / 434.7 | 10.7 / 14.1 |
+| `afterShellExecution` | 343.0 / 377.9 | 9.8 / 12.5 |
+| `beforeMCPExecution` | 351.9 / 378.4 | 10.2 / 13.5 |
+| `afterMCPExecution` | 350.3 / 394.4 | 9.6 / 12.1 |
+| `afterFileEdit` | 345.3 / 376.0 | 9.8 / 12.1 |
+| `subagentStart` | 388.1 / 468.3 | 9.3 / 10.4 |
+| `subagentStop` | 369.4 / 412.7 | 9.9 / 11.5 |
+| `afterAgentResponse` | 366.4 / 451.0 | 10.2 / 14.4 |
+| `stop` | 376.1 / 433.1 | 9.7 / 11.0 |
+| `preCompact` | 363.4 / 388.9 | 9.8 / 11.4 |
+| `beforeReadFile` | 350.7 / 394.9 | 10.2 / 11.8 |
+| `afterTabFileEdit` | 397.6 / 486.5 | 10.0 / 11.4 |
+| `afterAgentThought` | 350.8 / 394.2 | 10.2 / 11.3 |
+
+The unpaced burst run also delivered all 570 events. Ordinary-hook p95 reached 53.2 ms; repeated `sessionStart` p95 reached 65.1 ms. That passes the separate 75 ms burst budget, but does **not** meet the isolated 20 ms target under sustained overlapping load. These are runner measurements, not a latency guarantee for larger payloads or other machines.
 
 ### Per-project hooks
 
-Point Cursor at `.cursor/hooks.json` in this repo. Hooks call `.cursor/hooks/forward.sh`, which auto-starts the ingestor and forwards events.
+Point Cursor at `.cursor/hooks.json` in this repo. Hooks call `.cursor/hooks/forward.sh EVENT`, which uses the same sender and lean defaults as global hooks. Edit the event entries in `.cursor/hooks.json` to customize this project; keep the matching event argument. Only `sessionStart` auto-starts the ingestor.
 
 ### Manual start
 
@@ -181,4 +251,4 @@ GET  /debug/otlp-probe      — probe connectivity to all configured OTLP endpoi
 
 ## Requirements
 
-Node.js 22.23.4+, 24.22.1+ or 26.12.1+. These are the first releases on each line that reject TLS chains through the compromised eMudhra intermediates, which matters because exports go over OTLP/HTTPS. No build step.
+Node.js 22.23.4+, 24.22.1+ or 26.12.1+. These are the first releases on each line that reject TLS chains through the compromised eMudhra intermediates, which matters because exports go over OTLP/HTTPS. No build step. Hook forwarding requires Bash and curl; global hook installation also requires Python 3.

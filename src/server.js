@@ -1,6 +1,7 @@
 import "./env.js";
 import { readFileSync } from "node:fs";
 import express from "express";
+import { createHookRouter } from "./hook-receiver.js";
 import { maybeStartCursorApiPolling, stopCursorApiPolling } from "./cursor-api-poller.js";
 import { probeConfiguredOtlpEndpoints } from "./otlp-probe.js";
 import {
@@ -54,19 +55,7 @@ app.get("/debug/otlp-probe", async (_req, res) => {
   }
 });
 
-app.post("/cursor/hooks", (req, res) => {
-  try {
-    const event = req.body || {};
-    recordHookEvent({
-      ...event,
-      source: event.source || "cursor_hook"
-    });
-    res.status(202).json({ accepted: true });
-  } catch (error) {
-    console.error("Failed to process hook event:", error);
-    res.status(500).json({ accepted: false, error: error.message });
-  }
-});
+app.use(createHookRouter(recordHookEvent));
 
 const server = app.listen(port, () => {
   console.log(`cursorscope listening on http://localhost:${port}`);

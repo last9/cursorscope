@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve subagent and session closure across reordered delivery using bounded completion history per lifecycle kind; record session completion fields before ending spans.
+- Preserve prompt completion status when `stop` arrives before `beforeSubmitPrompt`, and suppress late starts using bounded generation history.
+
+- Remember recent tool completions so reordered background requests cannot reopen completed tool spans when their starts arrive late.
+- Drain hook payloads with buffered, size-bounded reads so complete inputs up to 1 MiB do not exhaust the stdin safety deadline.
+
+### Changed
+
+- Avoid temporary files and foreground helper processes for hook payloads under 1 KiB, keeping larger payloads buffered and size-bounded.
+
+- Hook forwarding uses background curl with ingestor-side enrichment instead of starting Node for every event. Permission hooks remain permissive when telemetry is unavailable, and health/version checks run only at session start.
+- Global and project hooks use lean defaults; thought, read-file, and tab-edit events are opt-in. Reinstalling hooks removes deselected cursorscope entries while preserving other hooks. Reinstall hooks and restart the ingestor after upgrading.
+
+### Added
+
+- A per-command hook benchmark with p50/p95 latency, delivery counts, isolated and burst modes, and optional latency budgets. Before/after measurements are recorded in the README.
+
 ## [0.3.8] - 2026-10-22
 
 ### Changed
