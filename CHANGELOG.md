@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve subagent and session closure across reordered delivery using bounded completion history per lifecycle kind; record session completion fields before ending spans.
 - Preserve prompt completion status when `stop` arrives before `beforeSubmitPrompt`, and suppress late starts using bounded generation history.
 
 - Remember recent tool completions so reordered background requests cannot reopen completed tool spans when their starts arrive late.

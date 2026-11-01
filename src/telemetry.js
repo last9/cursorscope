@@ -179,9 +179,14 @@ const activeSessions = new Map();
 const activeToolCalls = new Map();
 // Detached hook requests can deliver a finish before its start. Remember recent
 // completions so a late start cannot reopen a span already exported on its own.
-const completedToolCalls = new Map();
-const completedGenerations = new Map();
+const completedLifecycles = {
+  tool: new Map(),
+  generation: new Map(),
+  subagent: new Map(),
+  session: new Map()
+};
 const MAX_COMPLETED_IDS = 10_000;
+const COMPLETION_TTL_MS = 5 * 60 * 1000;
 
 // Tool calls and subagents are short-lived (seconds to low minutes); 5 min TTL.
 // Interactions (prompt→stop) and sessions last until the user finishes; 30 min
@@ -193,9 +198,9 @@ let _staleSweepTimer = null;
 
 export function sweepStaleSpans() {
   const now = Date.now();
-  for (const completions of [completedToolCalls, completedGenerations]) {
+  for (const completions of Object.values(completedLifecycles)) {
     for (const [id, completedAtMs] of completions) {
-      if (now - completedAtMs > STALE_TOOL_TTL_MS) completions.delete(id);
+      if (now - completedAtMs > COMPLETION_TTL_MS) completions.delete(id);
     }
   }
   for (const [id, entry] of activeToolCalls.entries()) {
@@ -235,17 +240,12 @@ function startStaleSweep() {
 startStaleSweep();
 
 export const _testHooks = {
-  backdateGenerationCompletion(generationId, ageMs) {
-    if (completedGenerations.has(generationId)) completedGenerations.set(generationId, Date.now() - ageMs);
+  backdateCompletion(kind, id, ageMs) {
+    const completions = completedLifecycles[kind];
+    if (completions.has(id)) completions.set(id, Date.now() - ageMs);
   },
-  getCompletedGenerationCount() {
-    return completedGenerations.size;
-  },
-  backdateToolCompletion(toolUseId, ageMs) {
-    if (completedToolCalls.has(toolUseId)) completedToolCalls.set(toolUseId, Date.now() - ageMs);
-  },
-  getCompletedToolCallCount() {
-    return completedToolCalls.size;
+  getCompletionCount(kind) {
+    return completedLifecycles[kind].size;
   },
   backdateToolCall(toolUseId, ageMs) {
     const entry = activeToolCalls.get(toolUseId);
@@ -393,6 +393,7 @@ function handleSessionStart(hookData, baseAttrs) {
   sessionCounter.add(1, legacyMetricLabels(baseAttrs, { composer_mode: hookData.composer_mode || "unknown" }));
 
   const sessionId = hookData.session_id || hookData.conversation_id;
+  if (wasRecentlyCompleted(completedLifecycles.session, sessionId)) return;
   if (sessionId && activeSessions.has(sessionId)) {
     endSession(sessionId, "superseded");
   }
@@ -419,30 +420,46 @@ function handleSessionStart(hookData, baseAttrs) {
 
 function handleSessionEnd(hookData, baseAttrs) {
   const sessionId = hookData.session_id || hookData.conversation_id;
+  if (wasRecentlyCompleted(completedLifecycles.session, sessionId)) return;
   endInteractionForConversation(sessionId, "session_end");
   const activeSession = sessionId ? activeSessions.get(sessionId) : undefined;
-  endSession(sessionId, hookData.reason || "session_end");
-  if (activeSession) {
-    activeSession.span.addEvent("gen_ai.client.session.end", {
-      "cursor.session.reason": hookData.reason,
-      "cursor.session.duration_ms": hookData.duration_ms,
-      "cursor.session.final_status": hookData.final_status
-    });
-    if (hookData.reason === "error") {
-      markSpanError(activeSession.span, hookData.error_message || "session_error");
-    }
+  // Completion may arrive first. Export what it tells us without inventing a start.
+  const span = activeSession?.span || startSpan(
+    spanNameInvokeAgent(GEN_AI_CURSOR_AGENT_NAME),
+    {
+      ...buildInvokeAgentAttributes(baseAttrs, { agentName: GEN_AI_CURSOR_AGENT_NAME }),
+      "cursor.span.role": "session"
+    },
+    context.active(), SpanKind.INTERNAL
+  );
+  span.addEvent("gen_ai.client.session.end", filterDefined({
+    "cursor.session.reason": hookData.reason,
+    "cursor.session.duration_ms": hookData.duration_ms,
+    "cursor.session.final_status": hookData.final_status
+  }));
+  if (hookData.reason === "error") {
+    markSpanError(span, hookData.error_message || "session_error");
   }
+  const reason = hookData.reason || "session_end";
+  if (activeSession) {
+    endSession(sessionId, reason);
+  } else {
+    span.setAttribute("cursor.session.end_reason", reason);
+    span.end();
+  }
+  rememberCompletion(completedLifecycles.session, sessionId);
 }
 
 function wasRecentlyCompleted(completions, id) {
   const completedAtMs = completions.get(id);
   if (completedAtMs === undefined) return false;
-  if (Date.now() - completedAtMs <= STALE_TOOL_TTL_MS) return true;
+  if (Date.now() - completedAtMs <= COMPLETION_TTL_MS) return true;
   completions.delete(id);
   return false;
 }
 
 function rememberCompletion(completions, id) {
+  if (!id) return;
   // Refresh insertion order so capacity eviction always drops the oldest ID.
   completions.delete(id);
   completions.set(id, Date.now());
@@ -456,7 +473,7 @@ function handleBeforeSubmitPrompt(hookData, baseAttrs) {
   const generationId = hookData.generation_id;
 
   promptCounter.add(1, legacyMetricLabels(baseAttrs));
-  if (wasRecentlyCompleted(completedGenerations, generationId)) return;
+  if (wasRecentlyCompleted(completedLifecycles.generation, generationId)) return;
 
   if (conversationId && openGenerationByConversation.has(conversationId)) {
     endInteraction(openGenerationByConversation.get(conversationId), "superseded");
@@ -531,7 +548,7 @@ function beginExecuteToolSpan(hookData, baseAttrs, parentCtx, hookName, toolName
     return;
   }
 
-  if (wasRecentlyCompleted(completedToolCalls, toolUseId)) return;
+  if (wasRecentlyCompleted(completedLifecycles.tool, toolUseId)) return;
 
   if (activeToolCalls.has(toolUseId)) {
     return;
@@ -613,7 +630,7 @@ function endExecuteToolSpan(hookData, baseAttrs, parentCtx, options) {
   }
 
   if (toolUseId) {
-    rememberCompletion(completedToolCalls, toolUseId);
+    rememberCompletion(completedLifecycles.tool, toolUseId);
   }
 
   toolCounter.add(
@@ -804,6 +821,7 @@ function handleSubagentStart(hookData, baseAttrs) {
 
   const parent = resolveParentContext(hookData, hookData.parent_conversation_id);
   const subagentId = hookData.subagent_id;
+  if (wasRecentlyCompleted(completedLifecycles.subagent, subagentId)) return;
   const agentName = hookData.subagent_type || "subagent";
 
   const span = startSpan(
@@ -828,6 +846,7 @@ function handleSubagentStart(hookData, baseAttrs) {
 
 function handleSubagentStop(hookData, baseAttrs) {
   const subagentId = hookData.subagent_id;
+  if (wasRecentlyCompleted(completedLifecycles.subagent, subagentId)) return;
   const agentName = hookData.subagent_type || "subagent";
   const active = subagentId ? activeSubagents.get(subagentId) : undefined;
 
@@ -859,7 +878,9 @@ function handleSubagentStop(hookData, baseAttrs) {
       {
         ...buildInvokeAgentAttributes(baseAttrs, { agentName, agentId: subagentId }),
         "cursor.subagent.status": hookData.status,
-        "cursor.subagent.duration_ms": hookData.duration_ms
+        "cursor.subagent.duration_ms": hookData.duration_ms,
+        "cursor.subagent.tool_call_count": hookData.tool_call_count,
+        "cursor.subagent.message_count": hookData.message_count
       },
       context.active(),
       SpanKind.INTERNAL
@@ -870,6 +891,7 @@ function handleSubagentStop(hookData, baseAttrs) {
     }
     span.end();
   }
+  rememberCompletion(completedLifecycles.subagent, subagentId);
 }
 
 function handleAfterAgentResponse(hookData, baseAttrs) {
@@ -916,7 +938,7 @@ function handleAfterAgentThought(hookData, baseAttrs) {
 
 function handleStop(hookData, baseAttrs) {
   const generationId = hookData.generation_id || openGenerationByConversation.get(hookData.conversation_id);
-  if (!generationId || wasRecentlyCompleted(completedGenerations, generationId)) return;
+  if (!generationId || wasRecentlyCompleted(completedLifecycles.generation, generationId)) return;
 
   const active = activeInteractions.get(generationId);
   // Export completion-only generations immediately, without superseding another
@@ -939,7 +961,7 @@ function handleStop(hookData, baseAttrs) {
     span.setAttribute("cursor.interaction.end_reason", "stop");
     span.end();
   }
-  rememberCompletion(completedGenerations, generationId);
+  rememberCompletion(completedLifecycles.generation, generationId);
 }
 
 function handlePreCompact(hookData, baseAttrs) {
