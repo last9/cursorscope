@@ -180,7 +180,8 @@ const activeToolCalls = new Map();
 // Detached hook requests can deliver a finish before its start. Remember recent
 // completions so a late start cannot reopen a span already exported on its own.
 const completedToolCalls = new Map();
-const MAX_COMPLETED_TOOL_CALLS = 10_000;
+const completedGenerations = new Map();
+const MAX_COMPLETED_IDS = 10_000;
 
 // Tool calls and subagents are short-lived (seconds to low minutes); 5 min TTL.
 // Interactions (prompt→stop) and sessions last until the user finishes; 30 min
@@ -192,8 +193,10 @@ let _staleSweepTimer = null;
 
 export function sweepStaleSpans() {
   const now = Date.now();
-  for (const [id, completedAtMs] of completedToolCalls) {
-    if (now - completedAtMs > STALE_TOOL_TTL_MS) completedToolCalls.delete(id);
+  for (const completions of [completedToolCalls, completedGenerations]) {
+    for (const [id, completedAtMs] of completions) {
+      if (now - completedAtMs > STALE_TOOL_TTL_MS) completions.delete(id);
+    }
   }
   for (const [id, entry] of activeToolCalls.entries()) {
     if (now - entry.createdAtMs > STALE_TOOL_TTL_MS) {
@@ -232,6 +235,12 @@ function startStaleSweep() {
 startStaleSweep();
 
 export const _testHooks = {
+  backdateGenerationCompletion(generationId, ageMs) {
+    if (completedGenerations.has(generationId)) completedGenerations.set(generationId, Date.now() - ageMs);
+  },
+  getCompletedGenerationCount() {
+    return completedGenerations.size;
+  },
   backdateToolCompletion(toolUseId, ageMs) {
     if (completedToolCalls.has(toolUseId)) completedToolCalls.set(toolUseId, Date.now() - ageMs);
   },
@@ -425,9 +434,29 @@ function handleSessionEnd(hookData, baseAttrs) {
   }
 }
 
+function wasRecentlyCompleted(completions, id) {
+  const completedAtMs = completions.get(id);
+  if (completedAtMs === undefined) return false;
+  if (Date.now() - completedAtMs <= STALE_TOOL_TTL_MS) return true;
+  completions.delete(id);
+  return false;
+}
+
+function rememberCompletion(completions, id) {
+  // Refresh insertion order so capacity eviction always drops the oldest ID.
+  completions.delete(id);
+  completions.set(id, Date.now());
+  if (completions.size > MAX_COMPLETED_IDS) {
+    completions.delete(completions.keys().next().value);
+  }
+}
+
 function handleBeforeSubmitPrompt(hookData, baseAttrs) {
   const conversationId = hookData.conversation_id;
   const generationId = hookData.generation_id;
+
+  promptCounter.add(1, legacyMetricLabels(baseAttrs));
+  if (wasRecentlyCompleted(completedGenerations, generationId)) return;
 
   if (conversationId && openGenerationByConversation.has(conversationId)) {
     endInteraction(openGenerationByConversation.get(conversationId), "superseded");
@@ -453,8 +482,6 @@ function handleBeforeSubmitPrompt(hookData, baseAttrs) {
       openGenerationByConversation.set(conversationId, generationId);
     }
   }
-
-  promptCounter.add(1, legacyMetricLabels(baseAttrs));
 }
 
 function handlePreToolUse(hookData, baseAttrs, hookName = "preToolUse") {
@@ -504,11 +531,7 @@ function beginExecuteToolSpan(hookData, baseAttrs, parentCtx, hookName, toolName
     return;
   }
 
-  const completedAtMs = completedToolCalls.get(toolUseId);
-  if (completedAtMs !== undefined) {
-    if (Date.now() - completedAtMs <= STALE_TOOL_TTL_MS) return;
-    completedToolCalls.delete(toolUseId);
-  }
+  if (wasRecentlyCompleted(completedToolCalls, toolUseId)) return;
 
   if (activeToolCalls.has(toolUseId)) {
     return;
@@ -590,12 +613,7 @@ function endExecuteToolSpan(hookData, baseAttrs, parentCtx, options) {
   }
 
   if (toolUseId) {
-    // Refresh insertion order so capacity eviction always drops the oldest ID.
-    completedToolCalls.delete(toolUseId);
-    completedToolCalls.set(toolUseId, Date.now());
-    if (completedToolCalls.size > MAX_COMPLETED_TOOL_CALLS) {
-      completedToolCalls.delete(completedToolCalls.keys().next().value);
-    }
+    rememberCompletion(completedToolCalls, toolUseId);
   }
 
   toolCounter.add(
@@ -897,24 +915,31 @@ function handleAfterAgentThought(hookData, baseAttrs) {
 }
 
 function handleStop(hookData, baseAttrs) {
-  const generationId = hookData.generation_id;
-  if (generationId && activeInteractions.has(generationId)) {
-    const active = activeInteractions.get(generationId);
-    active.span.addEvent("gen_ai.client.inference.operation.details", {
-      "cursor.agent.status": hookData.status,
-      "cursor.agent.loop_count": hookData.loop_count
-    });
-    active.span.setAttributes({
-      "cursor.agent.status": hookData.status,
-      "cursor.agent.loop_count": hookData.loop_count
-    });
-    if (hookData.status === "error") {
-      markSpanError(active.span, "agent_loop_error");
-    }
+  const generationId = hookData.generation_id || openGenerationByConversation.get(hookData.conversation_id);
+  if (!generationId || wasRecentlyCompleted(completedGenerations, generationId)) return;
+
+  const active = activeInteractions.get(generationId);
+  // Export completion-only generations immediately, without superseding another
+  // generation in the conversation or inventing time spent waiting for a start.
+  const span = active?.span || startSpan(
+    spanNameInvokeAgent(GEN_AI_CURSOR_AGENT_NAME),
+    buildInvokeAgentAttributes(baseAttrs, { agentName: GEN_AI_CURSOR_AGENT_NAME }),
+    context.active(), SpanKind.INTERNAL
+  );
+  const completionAttrs = filterDefined({
+    "cursor.agent.status": hookData.status,
+    "cursor.agent.loop_count": hookData.loop_count
+  });
+  span.addEvent("gen_ai.client.inference.operation.details", completionAttrs);
+  span.setAttributes(completionAttrs);
+  if (hookData.status === "error") markSpanError(span, "agent_loop_error");
+  if (active) {
     endInteraction(generationId, "stop");
   } else {
-    endInteractionForConversation(hookData.conversation_id, "stop");
+    span.setAttribute("cursor.interaction.end_reason", "stop");
+    span.end();
   }
+  rememberCompletion(completedGenerations, generationId);
 }
 
 function handlePreCompact(hookData, baseAttrs) {

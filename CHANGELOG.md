@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve prompt completion status when `stop` arrives before `beforeSubmitPrompt`, and suppress late starts using bounded generation history.
+
 - Remember recent tool completions so reordered background requests cannot reopen completed tool spans when their starts arrive late.
 - Drain hook payloads with buffered, size-bounded reads so complete inputs up to 1 MiB do not exhaust the stdin safety deadline.
 
