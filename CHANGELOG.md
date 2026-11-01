@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Avoid temporary files and foreground helper processes for hook payloads under 1 KiB, keeping larger payloads buffered and size-bounded.
+
 - Hook forwarding uses background curl with ingestor-side enrichment instead of starting Node for every event. Permission hooks remain permissive when telemetry is unavailable, and health/version checks run only at session start.
 - Global and project hooks use lean defaults; thought, read-file, and tab-edit events are opt-in. Reinstalling hooks removes deselected cursorscope entries while preserving other hooks. Reinstall hooks and restart the ingestor after upgrading.
 

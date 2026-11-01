@@ -181,3 +181,45 @@ test("only sessionStart runs startup checks, in the background before delivery",
   await eventually(() => delivered);
   assert.equal(await readFile(path.join(home, "startup"), "utf8"), "started\n");
 });
+
+test("small payloads bypass temporary files and preserve bytes at the buffering boundary", async (t) => {
+  let body;
+  const { env, home } = await fixture(t, (req, res) => {
+    let data = "";
+    req.on("data", (chunk) => { data += chunk; });
+    req.on("end", () => { body = new URLSearchParams(data).get("hook_input"); res.end("{}"); });
+  });
+  // Small hooks must not pay for a spool or its helper processes.
+  await writeFile(path.join(home, "bin/mktemp"), '#!/bin/sh\nexit 99\n', { mode: 0o755 });
+  for (const size of [0, 300, 1023]) {
+    body = undefined;
+    const payload = size ? JSON.stringify({ text: "x".repeat(size - 13) }) + "\n\n" : "";
+    assert.equal(Buffer.byteLength(payload), size);
+    const { result } = forward(env, "afterFileEdit", payload);
+    assert.equal((await result).code, 0);
+    await eventually(() => body !== undefined);
+    assert.equal(body, payload);
+  }
+  await rm(path.join(home, "bin/mktemp"));
+  for (const payload of ["x".repeat(1022) + "\n\n", "x".repeat(1023) + "\n\n",
+    JSON.stringify({ text: "x".repeat(1014) + "é" })]) {
+    // The UTF-8 character straddles the 1024-byte prefix/spool boundary.
+    body = undefined;
+    const { result } = forward(env, "afterFileEdit", payload);
+    assert.equal((await result).code, 0);
+    await eventually(() => body !== undefined);
+    assert.equal(body, payload);
+  }
+});
+
+test("stdin safety timeout also drops a stalled buffered payload", async (t) => {
+  let requests = 0;
+  const { env } = await fixture(t, (req, res) => { requests++; req.resume(); res.end("{}"); });
+  const { child, result } = forward(env, "afterFileEdit", "", { stdin: "pipe" });
+  child.stdin.on("error", () => {});
+  child.stdin.write("x".repeat(2048));
+  const output = await result;
+  assert.equal(output.code, 0);
+  assert.equal(output.stderr, "");
+  assert.equal(requests, 0);
+});

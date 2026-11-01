@@ -143,7 +143,7 @@ After upgrading, **reinstall hooks and restart the ingestor** (`npm run restart`
 
 Permission hooks return `{"permission":"allow"}`, prompt submission returns `{"continue":true}`, and other events return `{}`. Network and startup failures never deny a Cursor action. These responses follow the [Cursor hook schemas](https://cursor.com/docs/hooks).
 
-Forwarding is best effort: no durable queue or retry. The sender drains stdin into a private temporary file, capped at 1 MiB, and reads until EOF with a one-second safety deadline for a stuck producer; incomplete or oversized input is dropped. Reading large inputs takes longer than the small-payload benchmark below. The HTTP request runs after stdin is drained, in the background, with a 200 ms connection timeout and 500 ms total timeout. The temporary file is removed after delivery or failure. Output pipes are closed so Cursor does not wait for HTTP completion. Events during daemon startup or an outage may be lost; start the ingestor before a session when capturing its earliest events matters.
+Forwarding is best effort: no durable queue or retry. The sender drains stdin before exiting, capped at 1 MiB. Payloads under 1 KiB use a bounded shell read without a temporary file; larger inputs use a private temporary file and buffered reads. Each read stage has a one-second safety deadline for a stuck producer (up to two seconds total); incomplete or oversized input is dropped. Reading large inputs takes longer than the small-payload benchmark below. The HTTP request runs after stdin is drained, in the background, with a 200 ms connection timeout and 500 ms total timeout. The temporary file is removed after delivery or failure. Output pipes are closed so Cursor does not wait for HTTP completion. Events during daemon startup or an outage may be lost; start the ingestor before a session when capturing its earliest events matters.
 
 Detached requests can arrive out of order. Tool and prompt completions are exported immediately; the ingestor remembers up to 10,000 completed tool IDs and 10,000 completed generation IDs for five minutes and ignores late starts for those IDs, preventing duplicate open spans. A prompt completion received first preserves its status and loop count in a completion-only span; it does not infer the missing prompt duration. A completion received without its start retains completion fields but cannot recover start-only attributes.
 
@@ -166,31 +166,31 @@ node scripts/benchmark-hooks.js --hooks "$HOME/.cursor/hooks.json" --runs 30
 
 The JSON report includes p50/p95 wall time per command and health/event request counts. Timing includes process startup, stdin, exit, and output-pipe closure, but excludes background delivery. By default the generated-hook benchmark waits for delivery **outside** each timed sample before starting the next; `--burst` measures overlapping senders. `--hooks` executes the supplied commands without this delivery barrier. The fixture exports no OTLP data and does not start a real daemon; it isolates forwarding cost. A missed delivery or exceeded budget fails the generated-hook benchmark.
 
-Measured on a shared Linux runner with Node 24.22.1, 30 small sample payloads per event, healthy fixture: the isolated-call **p95 budget is 20 ms**. Before is the original Node forwarding chain; after uses the buffered shell sender. All 570 events arrived in both runs; health requests fell from 1,140 to 30 (one per `sessionStart`). The slowest isolated p95 was 23.2 ms, above the 20 ms target; the buffering fix trades some small-input overhead for reliable large-payload delivery. Test spies also verify that none of the installed hook commands starts Node against a healthy ingestor.
+Measured on a shared Linux runner with Node 24.22.1, 30 small sample payloads per event, healthy fixture: the isolated-call **p95 budget is 20 ms**. Before is the original Node forwarding chain; after uses the shell sender with its small-payload builtin read. All 570 events arrived in both runs; health requests fell from 1,140 to 30 (one per `sessionStart`). The slowest isolated p95 was 14.4 ms, within the 20 ms budget. Before the small-payload path, the buffered sender reached 24.3 ms in the same command during this review. Test spies also verify that none of the installed hook commands starts Node against a healthy ingestor.
 
 | Event | Before p50 / p95 (ms) | After p50 / p95 (ms) |
 |---|---:|---:|
-| `sessionStart` | 358.7 / 402.6 | 13.1 / 14.9 |
-| `sessionEnd` | 355.9 / 417.7 | 13.0 / 15.3 |
-| `beforeSubmitPrompt` | 349.5 / 387.8 | 12.2 / 14.2 |
-| `preToolUse` | 350.4 / 382.9 | 12.4 / 14.6 |
-| `postToolUse` | 348.4 / 405.8 | 12.5 / 17.0 |
-| `postToolUseFailure` | 347.3 / 386.8 | 12.7 / 23.2 |
-| `beforeShellExecution` | 363.4 / 434.7 | 12.9 / 15.2 |
-| `afterShellExecution` | 343.0 / 377.9 | 12.7 / 16.6 |
-| `beforeMCPExecution` | 351.9 / 378.4 | 12.6 / 16.2 |
-| `afterMCPExecution` | 350.3 / 394.4 | 13.6 / 15.6 |
-| `afterFileEdit` | 345.3 / 376.0 | 12.7 / 15.3 |
-| `subagentStart` | 388.1 / 468.3 | 12.8 / 15.9 |
-| `subagentStop` | 369.4 / 412.7 | 12.2 / 16.1 |
-| `afterAgentResponse` | 366.4 / 451.0 | 13.7 / 16.8 |
-| `stop` | 376.1 / 433.1 | 12.7 / 14.4 |
-| `preCompact` | 363.4 / 388.9 | 13.1 / 21.3 |
-| `beforeReadFile` | 350.7 / 394.9 | 13.1 / 15.7 |
-| `afterTabFileEdit` | 397.6 / 486.5 | 13.1 / 15.4 |
-| `afterAgentThought` | 350.8 / 394.2 | 12.9 / 14.6 |
+| `sessionStart` | 358.7 / 402.6 | 10.4 / 13.1 |
+| `sessionEnd` | 355.9 / 417.7 | 9.8 / 11.5 |
+| `beforeSubmitPrompt` | 349.5 / 387.8 | 10.3 / 12.5 |
+| `preToolUse` | 350.4 / 382.9 | 9.8 / 13.1 |
+| `postToolUse` | 348.4 / 405.8 | 10.0 / 11.9 |
+| `postToolUseFailure` | 347.3 / 386.8 | 10.4 / 12.1 |
+| `beforeShellExecution` | 363.4 / 434.7 | 10.7 / 14.1 |
+| `afterShellExecution` | 343.0 / 377.9 | 9.8 / 12.5 |
+| `beforeMCPExecution` | 351.9 / 378.4 | 10.2 / 13.5 |
+| `afterMCPExecution` | 350.3 / 394.4 | 9.6 / 12.1 |
+| `afterFileEdit` | 345.3 / 376.0 | 9.8 / 12.1 |
+| `subagentStart` | 388.1 / 468.3 | 9.3 / 10.4 |
+| `subagentStop` | 369.4 / 412.7 | 9.9 / 11.5 |
+| `afterAgentResponse` | 366.4 / 451.0 | 10.2 / 14.4 |
+| `stop` | 376.1 / 433.1 | 9.7 / 11.0 |
+| `preCompact` | 363.4 / 388.9 | 9.8 / 11.4 |
+| `beforeReadFile` | 350.7 / 394.9 | 10.2 / 11.8 |
+| `afterTabFileEdit` | 397.6 / 486.5 | 10.0 / 11.4 |
+| `afterAgentThought` | 350.8 / 394.2 | 10.2 / 11.3 |
 
-The unpaced burst run also delivered all 570 events. Ordinary-hook p95 reached 48.8 ms; repeated `sessionStart` p95 reached 55.9 ms. That passes the separate 75 ms burst budget, but does **not** meet the isolated 20 ms target under sustained overlapping load. These are runner measurements, not a latency guarantee for larger payloads or other machines.
+The unpaced burst run also delivered all 570 events. Ordinary-hook p95 reached 53.2 ms; repeated `sessionStart` p95 reached 65.1 ms. That passes the separate 75 ms burst budget, but does **not** meet the isolated 20 ms target under sustained overlapping load. These are runner measurements, not a latency guarantee for larger payloads or other machines.
 
 ### Per-project hooks
 
