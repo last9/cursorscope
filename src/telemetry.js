@@ -177,6 +177,10 @@ const activeSubagents = new Map();
 const activeSessions = new Map();
 /** @type {Map<string, { span: import('@opentelemetry/api').Span, ctx: import('@opentelemetry/api').Context, startHrTime: number, createdAtMs: number }>} */
 const activeToolCalls = new Map();
+// Detached hook requests can deliver a finish before its start. Remember recent
+// completions so a late start cannot reopen a span already exported on its own.
+const completedToolCalls = new Map();
+const MAX_COMPLETED_TOOL_CALLS = 10_000;
 
 // Tool calls and subagents are short-lived (seconds to low minutes); 5 min TTL.
 // Interactions (prompt→stop) and sessions last until the user finishes; 30 min
@@ -188,6 +192,9 @@ let _staleSweepTimer = null;
 
 export function sweepStaleSpans() {
   const now = Date.now();
+  for (const [id, completedAtMs] of completedToolCalls) {
+    if (now - completedAtMs > STALE_TOOL_TTL_MS) completedToolCalls.delete(id);
+  }
   for (const [id, entry] of activeToolCalls.entries()) {
     if (now - entry.createdAtMs > STALE_TOOL_TTL_MS) {
       entry.span.setAttribute("cursor.tool.stale", true);
@@ -225,6 +232,12 @@ function startStaleSweep() {
 startStaleSweep();
 
 export const _testHooks = {
+  backdateToolCompletion(toolUseId, ageMs) {
+    if (completedToolCalls.has(toolUseId)) completedToolCalls.set(toolUseId, Date.now() - ageMs);
+  },
+  getCompletedToolCallCount() {
+    return completedToolCalls.size;
+  },
   backdateToolCall(toolUseId, ageMs) {
     const entry = activeToolCalls.get(toolUseId);
     if (entry) entry.createdAtMs = Date.now() - ageMs;
@@ -491,6 +504,12 @@ function beginExecuteToolSpan(hookData, baseAttrs, parentCtx, hookName, toolName
     return;
   }
 
+  const completedAtMs = completedToolCalls.get(toolUseId);
+  if (completedAtMs !== undefined) {
+    if (Date.now() - completedAtMs <= STALE_TOOL_TTL_MS) return;
+    completedToolCalls.delete(toolUseId);
+  }
+
   if (activeToolCalls.has(toolUseId)) {
     return;
   }
@@ -568,6 +587,15 @@ function endExecuteToolSpan(hookData, baseAttrs, parentCtx, options) {
       markSpanError(span, hookData.error_message || hookData.failure_type || "tool_failed");
     }
     span.end();
+  }
+
+  if (toolUseId) {
+    // Refresh insertion order so capacity eviction always drops the oldest ID.
+    completedToolCalls.delete(toolUseId);
+    completedToolCalls.set(toolUseId, Date.now());
+    if (completedToolCalls.size > MAX_COMPLETED_TOOL_CALLS) {
+      completedToolCalls.delete(completedToolCalls.keys().next().value);
+    }
   }
 
   toolCounter.add(

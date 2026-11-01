@@ -145,6 +145,8 @@ Permission hooks return `{"permission":"allow"}`, prompt submission returns `{"c
 
 Forwarding is best effort: no durable queue or retry. The sender drains stdin into a private temporary file, capped at 1 MiB, and reads until EOF with a one-second safety deadline for a stuck producer; incomplete or oversized input is dropped. Reading large inputs takes longer than the small-payload benchmark below. The HTTP request runs after stdin is drained, in the background, with a 200 ms connection timeout and 500 ms total timeout. The temporary file is removed after delivery or failure. Output pipes are closed so Cursor does not wait for HTTP completion. Events during daemon startup or an outage may be lost; start the ingestor before a session when capturing its earliest events matters.
 
+Detached requests can arrive out of order. Tool completions are exported immediately; the ingestor remembers up to 10,000 completed tool IDs for five minutes and ignores late starts for those IDs, preventing duplicate open spans. A completion received without its start retains completion fields but cannot recover start-only attributes.
+
 `CURSOR_HOOK_ENDPOINT` overrides the destination; otherwise it is `http://127.0.0.1:${PORT:-4327}/cursor/hooks`. The updated ingestor accepts form-encoded `hook_input`, `user`, `repo`, and `event`, reconstructs the same telemetry fields (including all original input under `data`), and stamps receipt time. Existing JSON envelopes remain accepted. Point custom endpoints at an ingestor that supports the new transport.
 
 ### Hook benchmark
