@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -19,9 +19,17 @@ async function fixture(t, handler) {
   t.after(async () => {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
+    // Every exit path must release the private spool, including curl failures.
+    let files;
+    for (let i = 0; i < 100; i++) {
+      files = (await readdir(home)).filter((name) => name.startsWith("cursorscope-hook."));
+      if (!files.length) break;
+      await delay(10);
+    }
+    assert.deepEqual(files, [], "payload spool leaked");
     await rm(home, { recursive: true, force: true });
   });
-  const env = { ...process.env, HOME: home, CURSORSCOPE_HOME: root,
+  const env = { ...process.env, HOME: home, TMPDIR: home, CURSORSCOPE_HOME: root,
     PATH: `${home}/bin:${process.env.PATH}`, USER: 'test user & "quotes"',
     PORT: String(server.address().port), CURSORSCOPE_AUTO_START: "true",
     CURSOR_HOOK_ENDPOINT: `http://127.0.0.1:${server.address().port}/cursor/hooks` };
@@ -118,12 +126,29 @@ test("large payloads are sent intact without the command-line argument size limi
     req.on("data", (chunk) => { data += chunk; });
     req.on("end", () => { body = new URLSearchParams(data).get("hook_input"); res.end("{}"); });
   });
-  const input = JSON.stringify({ content: "x".repeat(150000) });
-  const { result } = forward(env, "afterFileEdit", input);
-  assert.equal((await result).code, 0);
-  await eventually(() => body !== undefined);
-  assert.equal(body.length, input.length);
-  assert.ok(body === input);
+  for (const size of [400014, 1048575, 1048576]) {
+    body = undefined;
+    const input = JSON.stringify({ content: "x".repeat(size - 14) });
+    assert.equal(Buffer.byteLength(input), size);
+    const { result } = forward(env, "afterFileEdit", input);
+    assert.equal((await result).code, 0);
+    await eventually(() => body !== undefined);
+    assert.equal(body.length, input.length);
+    assert.ok(body === input);
+  }
+});
+
+test("input one byte over the limit is dropped without waiting for EOF", async (t) => {
+  let requests = 0;
+  const { env } = await fixture(t, (req, res) => { requests++; req.resume(); res.end("{}"); });
+  const { child, result } = forward(env, "afterFileEdit", "", { stdin: "pipe" });
+  child.stdin.on("error", () => {});
+  child.stdin.write("x".repeat(1048577));
+  const output = await result;
+  assert.equal(output.code, 0);
+  assert.equal(output.stderr, "");
+  await delay(100);
+  assert.equal(requests, 0);
 });
 
 test("stdin safety timeout drops incomplete input and releases the hook", async (t) => {
@@ -133,7 +158,9 @@ test("stdin safety timeout drops incomplete input and releases the hook", async 
     { stdio: ["pipe", "pipe", "ignore"] });
   t.after(() => writer.kill());
   const { result } = forward(env, "beforeSubmitPrompt", "", { stdin: writer.stdout });
-  assert.deepEqual(JSON.parse((await result).stdout), { continue: true });
+  const output = await result;
+  assert.deepEqual(JSON.parse(output.stdout), { continue: true });
+  assert.equal(output.stderr, "");
   writer.stdin.end("done\n");
   assert.equal(requests, 0);
 });

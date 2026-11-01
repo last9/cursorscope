@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Drain hook payloads with buffered, size-bounded reads so complete inputs up to 1 MiB do not exhaust the stdin safety deadline.
+
 ### Changed
 
 - Hook forwarding uses background curl with ingestor-side enrichment instead of starting Node for every event. Permission hooks remain permissive when telemetry is unavailable, and health/version checks run only at session start.
