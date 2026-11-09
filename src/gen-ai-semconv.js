@@ -25,7 +25,9 @@ import {
   cliCommandLabel,
   parseToolPayload,
   resolveMcpServer,
-  resolveMcpTool
+  resolveMcpTool,
+  skillInvocationTrigger,
+  skillSourceFromPath
 } from "./attribution.js";
 
 export const GEN_AI_PROVIDER_NAME = "cursor";
@@ -189,6 +191,26 @@ export function buildExecuteToolAttributes(baseAttrs, toolContext, hookData, { i
   }
 
   return attrs;
+}
+
+/**
+ * Skill attributes use the names of the `claude_code.skill_activated` event, so one query covers both tools.
+ * @param {ReturnType<resolveExecuteToolContext>} toolContext
+ * @param {Record<string, unknown>} hookData
+ * @param {Set<string> | undefined} requestedSkills Skill names the user asked for in the latest prompt.
+ */
+export function buildSkillActivationAttributes(toolContext, hookData, requestedSkills) {
+  const { attribution } = toolContext;
+  if (attribution.category !== "skill" || !attribution.filePath) {
+    return {};
+  }
+  return filterDefined({
+    "skill.name": attribution.name,
+    "skill.source": skillSourceFromPath(attribution.filePath, {
+      workspaceRoots: hookData.workspace_roots
+    }),
+    invocation_trigger: skillInvocationTrigger(attribution.name, requestedSkills)
+  });
 }
 
 /** @param {{ input?: number, output?: number }} tokenEstimate */

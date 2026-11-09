@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Skill activation attributes**: a `Read` tool call that opens a `SKILL.md` now sets `skill.name`, `skill.source`, and `invocation_trigger` on its span. The names and values follow the `claude_code.skill_activated` event. The span is named `execute_tool skill:<name>`.
+
+### Fixed
+
+- **Skill reads were not classified**: the path of a `Read` tool call is in `tool_input`, but classification looked only at a top-level `file_path`. As a result, skill reads reached `cursor.attribution.category=tool`.
+
 ## [0.3.8] - 2026-10-22
 
 ### Changed

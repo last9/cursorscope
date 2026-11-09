@@ -1,4 +1,14 @@
+import { homedir } from "node:os";
+
 const SKILL_PATH_RE = /(?:^|[/\\])skills[/\\]|SKILL\.md$/i;
+const SKILL_MANIFEST_RE = /(?:^|[/\\])SKILL\.md$/i;
+const SKILL_INPUT_PATH_KEYS = ["file_path", "path", "target_file"];
+const READ_TOOL_NAMES = new Set(["read", "read_file", "readfile"]);
+const SLASH_MENTION_RE = /(?:^|\s)\/([A-Za-z0-9][\w.-]*)/g;
+
+/** Values follow the `claude_code.skill_activated` event. Cursor has no "nested-skill" signal. */
+export const SKILL_TRIGGER_USER_SLASH = "user-slash";
+export const SKILL_TRIGGER_AGENT_PROACTIVE = "agent-proactive";
 const MCP_TOOL_PREFIX_RE = /^mcp:\s*/i;
 const MCP_MATCHER_RE = /^MCP:\s*([^/]+)\/(.+)$/i;
 
@@ -100,6 +110,92 @@ export function skillNameFromPath(filePath) {
   return "skill";
 }
 
+/**
+ * Path of a SKILL.md that a Read-like tool call opened, taken from `tool_input`.
+ * @param {string} toolName
+ * @param {unknown} toolInput
+ */
+export function skillManifestPathFromInput(toolName, toolInput) {
+  if (!READ_TOOL_NAMES.has(String(toolName).toLowerCase())) {
+    return undefined;
+  }
+  const input = parseToolPayload(toolInput);
+  if (!input || typeof input !== "object") {
+    return undefined;
+  }
+  for (const key of SKILL_INPUT_PATH_KEYS) {
+    const value = input[key];
+    if (typeof value === "string" && SKILL_MANIFEST_RE.test(value)) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Where a skill was loaded from, using the `skill.source` values of Claude Code.
+ * @param {string} filePath
+ * @param {{ workspaceRoots?: unknown, homeDir?: string }} [options]
+ * @returns {"bundled" | "plugin" | "projectSettings" | "userSettings" | undefined}
+ */
+export function skillSourceFromPath(filePath, { workspaceRoots, homeDir = homedir() } = {}) {
+  if (typeof filePath !== "string" || !filePath) {
+    return undefined;
+  }
+  const path = filePath.replace(/\\/g, "/");
+  if (/\/\.cursor\/skills-cursor\//.test(path)) {
+    return "bundled";
+  }
+  if (/\/plugins\/(?:cache\/)?/.test(path)) {
+    return "plugin";
+  }
+  const roots = Array.isArray(workspaceRoots) ? workspaceRoots : [];
+  if (roots.some((root) => typeof root === "string" && root && path.startsWith(`${root}/`))) {
+    return "projectSettings";
+  }
+  if (homeDir && path.startsWith(`${homeDir}/`)) {
+    return "userSettings";
+  }
+  return undefined;
+}
+
+/**
+ * Skill names the user asked for in a prompt: `/name` mentions and attached SKILL.md files.
+ * @param {unknown} prompt
+ * @param {unknown} attachments
+ * @returns {Set<string>}
+ */
+export function requestedSkillNames(prompt, attachments) {
+  const names = new Set();
+  if (typeof prompt === "string") {
+    for (const match of prompt.matchAll(SLASH_MENTION_RE)) {
+      names.add(match[1].toLowerCase());
+    }
+  }
+  if (Array.isArray(attachments)) {
+    for (const attachment of attachments) {
+      const attachedPath = attachment?.file_path ?? attachment?.path;
+      if (typeof attachedPath === "string" && SKILL_MANIFEST_RE.test(attachedPath)) {
+        const name = skillNameFromPath(attachedPath);
+        if (name) {
+          names.add(name.toLowerCase());
+        }
+      }
+    }
+  }
+  return names;
+}
+
+/**
+ * @param {string} skillName
+ * @param {Set<string> | undefined} requestedNames
+ */
+export function skillInvocationTrigger(skillName, requestedNames) {
+  return requestedNames?.has(String(skillName).toLowerCase())
+    ? SKILL_TRIGGER_USER_SLASH
+    : SKILL_TRIGGER_AGENT_PROACTIVE;
+}
+
 /** @param {unknown} command */
 export function cliCommandLabel(command) {
   if (typeof command !== "string" || !command.trim()) {
@@ -193,6 +289,19 @@ export function classifyInvocation(hookName, hookData, toolNameOverride) {
       category: "skill",
       name: skillFromFile,
       detail: "file",
+      filePath: hookData.file_path,
+      operationName: "execute_tool"
+    };
+  }
+
+  const manifestPath = skillManifestPathFromInput(toolName, hookData.tool_input);
+  const skillFromInput = skillNameFromPath(manifestPath);
+  if (skillFromInput) {
+    return {
+      category: "skill",
+      name: skillFromInput,
+      detail: "file",
+      filePath: manifestPath,
       operationName: "execute_tool"
     };
   }
