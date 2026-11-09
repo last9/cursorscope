@@ -19,6 +19,7 @@ import {
 } from "./line-stats.js";
 import {
   classifyInvocation,
+  requestedSkillNames,
   estimateMcpContextTokens,
   estimateShellContextTokens,
   estimateToolContextTokens,
@@ -40,6 +41,7 @@ import {
 } from "@opentelemetry/semantic-conventions/incubating";
 import {
   buildExecuteToolAttributes,
+  buildSkillActivationAttributes,
   buildInvokeAgentAttributes,
   buildReasoningUsageAttributes,
   buildUsageTokenAttributes,
@@ -171,6 +173,11 @@ cursorApiMetricGauge.addCallback((result) => {
 const activeInteractions = new Map();
 /** @type {Map<string, string>} */
 const openGenerationByConversation = new Map();
+/**
+ * Skill names the user asked for in the latest prompt of each conversation. Never exported.
+ * @type {Map<string, Set<string>>}
+ */
+const requestedSkillsByConversation = new Map();
 /** @type {Map<string, { span: import('@opentelemetry/api').Span, ctx: import('@opentelemetry/api').Context, createdAtMs: number }>} */
 const activeSubagents = new Map();
 /** @type {Map<string, { span: import('@opentelemetry/api').Span, ctx: import('@opentelemetry/api').Context, createdAtMs: number }>} */
@@ -397,6 +404,7 @@ function handleSessionStart(hookData, baseAttrs) {
 
 function handleSessionEnd(hookData, baseAttrs) {
   const sessionId = hookData.session_id || hookData.conversation_id;
+  requestedSkillsByConversation.delete(hookData.conversation_id || sessionId);
   endInteractionForConversation(sessionId, "session_end");
   const activeSession = sessionId ? activeSessions.get(sessionId) : undefined;
   endSession(sessionId, hookData.reason || "session_end");
@@ -415,6 +423,13 @@ function handleSessionEnd(hookData, baseAttrs) {
 function handleBeforeSubmitPrompt(hookData, baseAttrs) {
   const conversationId = hookData.conversation_id;
   const generationId = hookData.generation_id;
+
+  if (conversationId) {
+    requestedSkillsByConversation.set(
+      conversationId,
+      requestedSkillNames(hookData.prompt, hookData.attachments)
+    );
+  }
 
   if (conversationId && openGenerationByConversation.has(conversationId)) {
     endInteraction(openGenerationByConversation.get(conversationId), "superseded");
@@ -495,9 +510,16 @@ function beginExecuteToolSpan(hookData, baseAttrs, parentCtx, hookName, toolName
     return;
   }
 
-  const attrs = buildExecuteToolAttributes(baseAttrs, toolContext, hookData, {
-    includePayloads: logToolDetails
-  });
+  const attrs = {
+    ...buildExecuteToolAttributes(baseAttrs, toolContext, hookData, {
+      includePayloads: logToolDetails
+    }),
+    ...buildSkillActivationAttributes(
+      toolContext,
+      hookData,
+      requestedSkillsByConversation.get(hookData.conversation_id)
+    )
+  };
 
   const span = startSpan(spanNameExecuteTool(toolContext.genAiToolName), attrs, parentCtx, SpanKind.INTERNAL);
   const ctx = trace.setSpan(parentCtx, span);
@@ -534,7 +556,12 @@ function endExecuteToolSpan(hookData, baseAttrs, parentCtx, options) {
     "cursor.lines.removed": hookData.cursor_lines_removed,
     "cursor.file.basename": basenameOnly(hookData.file_path),
     "cursor.file.extension": hookData.file_path ? inferFileExtension(hookData.file_path) : undefined,
-    "error.type": errorType
+    "error.type": errorType,
+    ...buildSkillActivationAttributes(
+      toolContext,
+      hookData,
+      requestedSkillsByConversation.get(hookData.conversation_id)
+    )
   });
 
   if (logToolDetails) {

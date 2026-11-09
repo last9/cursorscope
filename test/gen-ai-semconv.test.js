@@ -13,6 +13,7 @@ import {
   buildExecuteToolAttributes,
   buildInvokeAgentAttributes,
   buildReasoningUsageAttributes,
+  buildSkillActivationAttributes,
   buildUsageTokenAttributes,
   GEN_AI_CURSOR_AGENT_NAME,
   GEN_AI_PROVIDER_NAME,
@@ -150,6 +151,33 @@ describe("gen-ai-semconv", () => {
     it("estimates reasoning output tokens", () => {
       const attrs = buildReasoningUsageAttributes("12345678");
       assert.equal(attrs["gen_ai.usage.reasoning.output_tokens"], 2);
+    });
+  });
+
+  describe("buildSkillActivationAttributes", () => {
+    const skillRead = {
+      tool_name: "Read",
+      tool_input: { file_path: "/work/repo/.cursor/skills/share/SKILL.md" },
+      workspace_roots: ["/work/repo"]
+    };
+
+    it("adds skill.name, skill.source, and invocation_trigger for a SKILL.md read", () => {
+      const toolContext = resolveExecuteToolContext(skillRead, "postToolUse", "Read");
+      assert.deepEqual(buildSkillActivationAttributes(toolContext, skillRead, new Set(["share"])), {
+        "skill.name": "share",
+        "skill.source": "projectSettings",
+        invocation_trigger: "user-slash"
+      });
+      assert.equal(
+        buildSkillActivationAttributes(toolContext, skillRead, undefined).invocation_trigger,
+        "agent-proactive"
+      );
+    });
+
+    it("returns no attributes for other tool calls", () => {
+      const hookData = { tool_name: "Read", tool_input: { file_path: "/work/repo/src/a.js" } };
+      const toolContext = resolveExecuteToolContext(hookData, "postToolUse", "Read");
+      assert.deepEqual(buildSkillActivationAttributes(toolContext, hookData, undefined), {});
     });
   });
 });

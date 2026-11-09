@@ -164,6 +164,16 @@ User prompts are redacted by default — only prompt length is recorded. Set `CU
 
 **Traces** — one root span per session, one span per prompt/generation, tool call spans as children with duration and success/failure, subagent spans branching from parent conversations.
 
+**Skill activations** — when the agent reads a `SKILL.md`, the tool call span is named `execute_tool skill:<name>` and carries the same attributes as the [`claude_code.skill_activated`](https://code.claude.com/docs/en/monitoring-usage#skill-activated-event) event, so one query covers Cursor and Claude Code:
+
+| Attribute | Value |
+| --- | --- |
+| `skill.name` | Skill folder name, for example `share` |
+| `skill.source` | `bundled`, `plugin`, `projectSettings`, or `userSettings` |
+| `invocation_trigger` | `user-slash` if the prompt has `/<name>` or attaches the `SKILL.md`. `agent-proactive` if the agent chose the skill. |
+
+Cursor has no signal for `nested-skill`. Cursorscope reads the prompt in memory only to set `invocation_trigger`. It never exports the prompt text. A skill that the agent opens with a shell command (`cat SKILL.md`) is not detected.
+
 **Metrics** — `cursor_hook_events_total`, `cursor_session_total`, `cursor_prompt_total`, `cursor_tool_executions_total`, `gen_ai.client.operation.duration`, `gen_ai.client.token.usage`, `cursor_api_metric_value` (Admin API polling).
 
 **Logs** — one structured log record per hook event with conversation ID, model, and hook-specific fields.

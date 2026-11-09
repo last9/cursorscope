@@ -9,9 +9,13 @@ import {
   estimateToolContextTokens,
   extractReportedTokenUsage,
   parseToolPayload,
+  requestedSkillNames,
   resolveMcpServer,
   resolveMcpTool,
-  skillNameFromPath
+  skillInvocationTrigger,
+  skillManifestPathFromInput,
+  skillNameFromPath,
+  skillSourceFromPath
 } from "../src/attribution.js";
 
 describe("attribution", () => {
@@ -131,12 +135,98 @@ describe("attribution", () => {
       assert.equal(result.name, "foo");
     });
 
+    it("classifies a Read tool call that opens a SKILL.md in tool_input", () => {
+      const result = classifyInvocation("postToolUse", {
+        tool_name: "Read",
+        tool_input: { file_path: "/Users/x/.cursor/skills-cursor/share/SKILL.md" }
+      });
+      assert.equal(result.category, "skill");
+      assert.equal(result.name, "share");
+      assert.equal(result.filePath, "/Users/x/.cursor/skills-cursor/share/SKILL.md");
+    });
+
+    it("does not classify a Write to a SKILL.md as a skill activation", () => {
+      const result = classifyInvocation("postToolUse", {
+        tool_name: "Write",
+        tool_input: { file_path: "/proj/.cursor/skills/foo/SKILL.md" }
+      });
+      assert.equal(result.category, "tool");
+    });
+
+    it("does not classify a Read of another file in a skill folder as an activation", () => {
+      const result = classifyInvocation("postToolUse", {
+        tool_name: "Read",
+        tool_input: { file_path: "/proj/.cursor/skills/foo/scripts/run.js" }
+      });
+      assert.equal(result.category, "tool");
+    });
+
     it("classifies subagent from hook data", () => {
       const result = classifyInvocation("subagentStart", {
         subagent_type: "explore"
       });
       assert.equal(result.category, "subagent");
       assert.equal(result.name, "explore");
+    });
+  });
+
+  describe("skillManifestPathFromInput", () => {
+    it("reads file_path, path, and target_file from object or JSON string input", () => {
+      assert.equal(skillManifestPathFromInput("Read", { path: "/a/skills/x/SKILL.md" }), "/a/skills/x/SKILL.md");
+      assert.equal(
+        skillManifestPathFromInput("read_file", JSON.stringify({ target_file: "/a/x/SKILL.md" })),
+        "/a/x/SKILL.md"
+      );
+    });
+
+    it("ignores tools that do not read files", () => {
+      assert.equal(skillManifestPathFromInput("Grep", { path: "/a/x/SKILL.md" }), undefined);
+    });
+  });
+
+  describe("skillSourceFromPath", () => {
+    const options = { workspaceRoots: ["/work/repo"], homeDir: "/home/me" };
+
+    it("maps paths to the skill.source values of Claude Code", () => {
+      assert.equal(skillSourceFromPath("/home/me/.cursor/skills-cursor/share/SKILL.md", options), "bundled");
+      assert.equal(
+        skillSourceFromPath("/home/me/.cursor/plugins/cache/p/skills/a/SKILL.md", options),
+        "plugin"
+      );
+      assert.equal(skillSourceFromPath("/work/repo/.claude/skills/a/SKILL.md", options), "projectSettings");
+      assert.equal(skillSourceFromPath("/home/me/.cursor/skills/a/SKILL.md", options), "userSettings");
+      assert.equal(skillSourceFromPath("/elsewhere/skills/a/SKILL.md", options), undefined);
+    });
+
+    it("prefers projectSettings when the workspace is inside the home directory", () => {
+      assert.equal(
+        skillSourceFromPath("/home/me/repo/.cursor/skills/a/SKILL.md", {
+          workspaceRoots: ["/home/me/repo"],
+          homeDir: "/home/me"
+        }),
+        "projectSettings"
+      );
+    });
+  });
+
+  describe("requestedSkillNames and skillInvocationTrigger", () => {
+    it("collects slash mentions and attached SKILL.md files", () => {
+      const names = requestedSkillNames("please run /Share and then /loop 5m", [
+        { type: "file", file_path: "/a/skills/Canvas/SKILL.md" },
+        { type: "file", file_path: "/a/src/index.js" }
+      ]);
+      assert.deepEqual([...names].sort(), ["canvas", "loop", "share"]);
+    });
+
+    it("does not treat a path in the middle of a word as a slash mention", () => {
+      assert.equal(requestedSkillNames("see src/share/index.js", []).size, 0);
+    });
+
+    it("returns user-slash when the user asked for the skill and agent-proactive otherwise", () => {
+      const requested = requestedSkillNames("/share my work", []);
+      assert.equal(skillInvocationTrigger("share", requested), "user-slash");
+      assert.equal(skillInvocationTrigger("loop", requested), "agent-proactive");
+      assert.equal(skillInvocationTrigger("loop", undefined), "agent-proactive");
     });
   });
 
